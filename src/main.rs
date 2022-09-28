@@ -3,6 +3,7 @@ use std::{
     error::Error,
 };
 
+use derive_more::{Add, AddAssign, From, Sub, SubAssign};
 use midly::{
     num::{u28, u4, u7},
     Header, MidiMessage, Timing, TrackEvent, TrackEventKind,
@@ -10,7 +11,75 @@ use midly::{
 
 const MEGALOVANIA: &str = "Undertale_-_Megalovania.mid";
 
-#[derive(Debug)]
+#[derive(
+    From, Add, AddAssign, Sub, SubAssign, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug,
+)]
+struct Ticks(u32);
+impl Ticks {
+    fn quantize_to_ticks(&self, midi_info: MidiInfo, duration: NoteDuration) -> Ticks {
+        let beats = midi_info.to_beats(*self);
+        let factor = duration.beat_factor();
+        let beats = (beats * factor).trunc() / factor;
+        midi_info.to_ticks(beats)
+    }
+
+    fn to_duration_units(&self, midi_info: MidiInfo, duration: NoteDuration) -> f32 {
+        let beats = midi_info.to_beats(*self);
+        let factor = duration.beat_factor();
+        beats * factor
+    }
+}
+impl From<f32> for Ticks {
+    fn from(x: f32) -> Self {
+        Self(x as u32)
+    }
+}
+impl From<u28> for Ticks {
+    fn from(x: u28) -> Self {
+        Ticks(x.as_int())
+    }
+}
+impl From<Ticks> for u28 {
+    fn from(x: Ticks) -> Self {
+        u28::new(x.0)
+    }
+}
+impl From<Ticks> for f32 {
+    fn from(x: Ticks) -> f32 {
+        x.0 as f32
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NoteDuration {
+    Whole,
+    Half,
+    Quarter,
+    Eighth,
+    Sixteenth,
+    ThirtySecond,
+    SixtyFourth,
+}
+
+impl NoteDuration {
+    fn to_beats(&self, num_units: u32) -> f32 {
+        num_units as f32 / self.beat_factor()
+    }
+    // Return the multiplier for converting from a beat to the given NoteDuration
+    fn beat_factor(&self) -> f32 {
+        match self {
+            NoteDuration::Whole => 0.25,
+            NoteDuration::Half => 0.5,
+            NoteDuration::Quarter => 1.0,
+            NoteDuration::Eighth => 2.0,
+            NoteDuration::Sixteenth => 4.0,
+            NoteDuration::ThirtySecond => 8.0,
+            NoteDuration::SixtyFourth => 16.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct TimeSignature {
     numerator: u8,
     denominator: u8,
@@ -18,7 +87,7 @@ struct TimeSignature {
     thirty_second_notes_per_quarter_note: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct MidiInfo {
     timing: Timing,
     tempo: Option<u32>,
@@ -79,8 +148,8 @@ impl MidiInfo {
         }
     }
 
-    fn to_beats(&self, ticks: u28) -> f32 {
-        let ticks = ticks.as_int() as f32;
+    fn to_beats(&self, ticks: Ticks) -> f32 {
+        let ticks: f32 = ticks.into();
         match self.timing {
             Timing::Metrical(ticks_per_beat) => {
                 let ticks_per_beat = ticks_per_beat.as_int() as f32;
@@ -102,12 +171,11 @@ impl MidiInfo {
         }
     }
 
-    fn to_ticks(&self, sixteenths: u32) -> u28 {
-        let beats = sixteenths as f32 / 4.0;
+    fn to_ticks(&self, beats: f32) -> Ticks {
         match self.timing {
             Timing::Metrical(ticks_per_beat) => {
                 let ticks_per_beat = ticks_per_beat.as_int() as f32;
-                u28::new((ticks_per_beat * beats) as u32)
+                Ticks::from(ticks_per_beat * beats)
             }
             Timing::Timecode(fps, ticks_per_frame) => {
                 let fps = fps.as_f32();
@@ -115,7 +183,7 @@ impl MidiInfo {
                 if let Some(seconds_per_beat) = self.seconds_per_beat() {
                     let seconds = seconds_per_beat * beats;
                     let ticks = seconds * fps * ticks_per_frame;
-                    u28::new(ticks as u32)
+                    Ticks::from(ticks)
                 } else {
                     // If the tempo wasn't provided, then we do not know how many beats it has been.
                     // Panic in this scenario.
@@ -133,31 +201,25 @@ impl MidiInfo {
         // or 60 / 0.26087 = 229.99996 -> 230 beats per minute.
         self.tempo.map(|tempo| (tempo as f32) / 1_000_000.0)
     }
-
-    fn quantize_to_16ths(&self, ticks: u28) -> u28 {
-        let beats = self.to_beats(ticks);
-        let sixteenths = beats * 4.0;
-        self.to_ticks(sixteenths as u32)
-    }
 }
 
 struct Note {
     key: u7,
     vel: u7,
-    start: u28,
-    length: u28,
+    start: Ticks,
+    length: Ticks,
     channel: u4,
 }
 
 impl Note {
     fn from_events(events: &[TrackEvent]) -> Vec<Note> {
         let mut notes = vec![];
-        let mut ticks = u28::new(0);
+        let mut ticks = Ticks::from(0);
 
-        let mut active_notes = HashMap::<u7, Vec<(u28, u7)>>::new();
+        let mut active_notes = HashMap::<u7, Vec<(Ticks, u7)>>::new();
 
         for event in events {
-            ticks = ticks + event.delta;
+            ticks = ticks + event.delta.into();
             match event.kind {
                 TrackEventKind::Midi { message, channel } => match message {
                     midly::MidiMessage::NoteOn { key, vel } => {
@@ -225,12 +287,45 @@ impl Note {
                 *time
             };
             track_events.push(TrackEvent {
-                delta,
+                delta: delta.into(),
                 kind: *event,
             });
         }
         track_events
     }
+
+    fn quantize(&self, midi_info: MidiInfo, quantization: NoteDuration) -> QuantizedNote {
+        QuantizedNote {
+            key: self.key,
+            vel: self.vel,
+            channel: self.channel,
+            quantization,
+            start: self.start.to_duration_units(midi_info, quantization).ceil() as u32,
+            length: self
+                .length
+                .to_duration_units(midi_info, quantization)
+                .ceil() as u32,
+        }
+    }
+
+    fn from_quantized(midi_info: MidiInfo, note: QuantizedNote) -> Self {
+        Self {
+            key: note.key,
+            vel: note.vel,
+            channel: note.channel,
+            start: midi_info.to_ticks(note.quantization.to_beats(note.start)),
+            length: midi_info.to_ticks(note.quantization.to_beats(note.length)),
+        }
+    }
+}
+
+struct QuantizedNote {
+    key: u7,
+    vel: u7,
+    channel: u4,
+    quantization: NoteDuration,
+    start: u32,
+    length: u32,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -252,6 +347,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     for track in tracks.iter().skip(2) {
         let notes = Note::from_events(&track);
+        let notes = notes.iter().map(|note| {
+            let note = note.quantize(midi_info, NoteDuration::Eighth);
+            Note::from_quantized(midi_info, note)
+        });
         let out_track = Note::to_events(notes);
 
         out_tracks.push(out_track);

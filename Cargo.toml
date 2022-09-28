@@ -6,5 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+derive_more = "0.99.17"
 # Pinned to this commit: https://github.com/a2aaron/midly/commit/62216a6f296d77f10c62008b8dadc02b2804f354
 midly = { git = "https://github.com/a2aaron/midly", rev = "62216a6f296d77f10c62008b8dadc02b2804f354" }
