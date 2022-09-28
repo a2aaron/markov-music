@@ -98,9 +98,8 @@ dependencies = [
 
 [[package]]
 name = "midly"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5f3c664ced7caa98ccb7ed4c67cd0bd6a6bd8ecedf8b49f38544a4a8e50f0ae"
+version = "0.5.3"
+source = "git+https://github.com/a2aaron/midly?rev=62216a6f296d77f10c62008b8dadc02b2804f354#62216a6f296d77f10c62008b8dadc02b2804f354"
 dependencies = [
  "rayon",
 ]

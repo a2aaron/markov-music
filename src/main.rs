@@ -157,7 +157,7 @@ impl Note {
         let mut active_notes = HashMap::<u7, Vec<(u28, u7)>>::new();
 
         for event in events {
-            ticks = u28::new(ticks.as_int() + event.delta.as_int());
+            ticks = ticks + event.delta;
             match event.kind {
                 TrackEventKind::Midi { message, channel } => match message {
                     midly::MidiMessage::NoteOn { key, vel } => {
@@ -170,7 +170,7 @@ impl Note {
                         if let Entry::Occupied(mut entry) = active_notes.entry(key) {
                             let vec = entry.get_mut();
                             if let Some((note_on, vel)) = vec.pop() {
-                                let length = u28::new(ticks.as_int() - note_on.as_int());
+                                let length = ticks - note_on;
                                 notes.push(Note {
                                     channel,
                                     key,
@@ -212,10 +212,7 @@ impl Note {
                 },
             };
             events.push((note.start, note_on));
-            events.push((
-                u28::new(note.start.as_int() + note.length.as_int()),
-                note_off,
-            ));
+            events.push((note.start + note.length, note_off));
         }
         events.sort_by(|(start, _), (end, _)| start.cmp(end));
 
@@ -223,12 +220,12 @@ impl Note {
         for (i, (time, event)) in events.iter().enumerate() {
             let delta = if i != 0 {
                 let (prev_time, _) = events[i - 1];
-                time.as_int() - prev_time.as_int()
+                *time - prev_time
             } else {
-                time.as_int()
+                *time
             };
             track_events.push(TrackEvent {
-                delta: u28::new(delta),
+                delta,
                 kind: *event,
             });
         }
