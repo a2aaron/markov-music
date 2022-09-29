@@ -1,15 +1,15 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{btree_map, hash_map, BTreeMap, HashMap};
 
 use derive_more::{Add, AddAssign, From, Sub, SubAssign};
 use midly::{
-    num::{u28, u4, u7},
-    Header, MidiMessage, Timing, TrackEvent, TrackEventKind,
+    num::{u24, u28, u4, u7},
+    Header, MetaMessage, MidiMessage, Timing, TrackEvent, TrackEventKind,
 };
 
 #[derive(Debug, Clone, Copy)]
 pub struct MidiInfo {
     timing: Timing,
-    tempo: Option<u32>,
+    tempo: Option<u24>,
     time_sig: Option<TimeSignature>,
 }
 
@@ -27,14 +27,14 @@ impl MidiInfo {
         let mut tempo = None;
         for event in meta_events {
             match event {
-                midly::MetaMessage::Tempo(tempo_u24) => {
+                midly::MetaMessage::Tempo(new_tempo) => {
                     if let Some(tempo) = tempo {
                         println!(
                             "[Warning] Tempo already set! Old: {:?}, new: {:?}",
-                            tempo_u24, tempo
+                            tempo, new_tempo
                         );
                     }
-                    tempo = Some(tempo_u24.as_int())
+                    tempo = Some(new_tempo)
                 }
                 midly::MetaMessage::TimeSignature(
                     numerator,
@@ -64,6 +64,29 @@ impl MidiInfo {
             timing: header.timing,
             tempo,
             time_sig,
+        }
+    }
+
+    pub fn tempo_event(&self) -> Option<TrackEvent<'static>> {
+        if let Some(tempo) = self.tempo {
+            Some(TrackEvent {
+                delta: 0.into(),
+                kind: TrackEventKind::Meta(MetaMessage::Tempo(tempo)),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn time_signature_event(&self) -> Option<TrackEvent<'static>> {
+        if let Some(time_sig) = self.time_sig {
+            let msg = time_sig.as_meta_message();
+            Some(TrackEvent {
+                delta: 0.into(),
+                kind: TrackEventKind::Meta(msg),
+            })
+        } else {
+            None
         }
     }
 
@@ -118,10 +141,12 @@ impl MidiInfo {
         // For example, the Megalovania MIDI has a tempo value of 260,870 microseconds per beat.
         // This equals 260,870 / 1,000,000 = 0.26087 seconds per beat
         // or 60 / 0.26087 = 229.99996 -> 230 beats per minute.
-        self.tempo.map(|tempo| (tempo as f32) / 1_000_000.0)
+        self.tempo
+            .map(|tempo| (tempo.as_int() as f32) / 1_000_000.0)
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct Note {
     key: u7,
     vel: u7,
@@ -148,7 +173,7 @@ impl Note {
                             .or_insert(vec![(ticks, vel)]);
                     }
                     midly::MidiMessage::NoteOff { key, vel: _ } => {
-                        if let Entry::Occupied(mut entry) = active_notes.entry(key) {
+                        if let hash_map::Entry::Occupied(mut entry) = active_notes.entry(key) {
                             let vec = entry.get_mut();
                             if let Some((note_on, vel)) = vec.pop() {
                                 let length = ticks - note_on;
@@ -197,6 +222,10 @@ impl Note {
         }
         events.sort_by(|(start, _), (end, _)| start.cmp(end));
 
+        for event in &events {
+            println!("{:?}", event);
+        }
+
         let mut track_events = vec![];
         for (i, (time, event)) in events.iter().enumerate() {
             let delta = if i != 0 {
@@ -219,7 +248,10 @@ impl Note {
             vel: self.vel,
             channel: self.channel,
             quantization,
-            start: self.start.to_duration_units(midi_info, quantization).ceil() as u32,
+            start: self
+                .start
+                .to_duration_units(midi_info, quantization)
+                .floor() as u32,
             length: self
                 .length
                 .to_duration_units(midi_info, quantization)
@@ -238,6 +270,7 @@ impl Note {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct QuantizedNote {
     key: u7,
     vel: u7,
@@ -245,6 +278,72 @@ pub struct QuantizedNote {
     quantization: NoteDuration,
     start: u32,
     length: u32,
+}
+
+#[derive(Debug)]
+pub struct StepSequencer {
+    notes: BTreeMap<u32, Vec<u7>>,
+    quantization: NoteDuration,
+}
+impl StepSequencer {
+    pub fn from_notes(
+        notes: &[Note],
+        midi_info: MidiInfo,
+        quantization: NoteDuration,
+    ) -> StepSequencer {
+        let notes: Vec<_> = notes
+            .iter()
+            .map(|note| note.quantize(midi_info, quantization))
+            .collect();
+
+        let mut map = BTreeMap::new();
+        for note in notes {
+            for i in note.start..note.start + note.length {
+                match map.entry(i) {
+                    btree_map::Entry::Vacant(entry) => {
+                        entry.insert(vec![note.key]);
+                    }
+                    btree_map::Entry::Occupied(mut entry) => entry.get_mut().push(note.key),
+                }
+            }
+        }
+
+        StepSequencer {
+            notes: map,
+            quantization,
+        }
+    }
+
+    pub fn get_notes(&self, step: u32) -> Vec<u7> {
+        self.notes.get(&step).cloned().unwrap_or(vec![])
+    }
+
+    pub fn to_notes(&self) -> Vec<QuantizedNote> {
+        let mut quantized_notes = vec![];
+        let mut active_notes = HashMap::<u7, u32>::new();
+        for (&step, notes) in self.notes.iter() {
+            for &key in notes {
+                if let hash_map::Entry::Vacant(entry) = active_notes.entry(key) {
+                    entry.insert(step);
+                } else {
+                    for (_, start) in
+                        active_notes.drain_filter(|&active_note, _| key != active_note)
+                    {
+                        let note = QuantizedNote {
+                            key,
+                            vel: u7::max_value(),
+                            channel: u4::new(0),
+                            quantization: self.quantization,
+                            start,
+                            length: step - start,
+                        };
+                        quantized_notes.push(note);
+                    }
+                }
+            }
+        }
+        quantized_notes
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -282,6 +381,17 @@ struct TimeSignature {
     denominator: u8,
     midi_clocks_per_click: u8,
     thirty_second_notes_per_quarter_note: u8,
+}
+
+impl TimeSignature {
+    fn as_meta_message(&self) -> MetaMessage<'static> {
+        MetaMessage::TimeSignature(
+            self.numerator,
+            self.denominator,
+            self.midi_clocks_per_click,
+            self.thirty_second_notes_per_quarter_note,
+        )
+    }
 }
 
 #[derive(
