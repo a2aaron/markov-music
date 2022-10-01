@@ -278,15 +278,59 @@ pub struct QuantizedNote {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MarkovNote {
-    pub key: u8,
+    pub pitches: MarkovNotePitches,
     pub length: u32,
 }
 
-impl From<QuantizedNote> for MarkovNote {
-    fn from(note: QuantizedNote) -> Self {
-        MarkovNote {
-            key: note.key.as_int(),
-            length: note.length,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MarkovNotePitches {
+    One(u7),
+    Two(u7, u7),
+    Three(u7, u7, u7),
+}
+
+impl MarkovNotePitches {
+    pub fn one(a: u7) -> MarkovNotePitches {
+        MarkovNotePitches::One(a)
+    }
+
+    pub fn two(a: u7, b: u7) -> MarkovNotePitches {
+        let (lower, higher) = if a <= b { (a, b) } else { (b, a) };
+        MarkovNotePitches::Two(lower, higher)
+    }
+
+    pub fn three(a: u7, b: u7, c: u7) -> MarkovNotePitches {
+        let [min, mid, max] = {
+            let mut arr = [a, b, c];
+            arr.sort();
+            arr
+        };
+        MarkovNotePitches::Three(min, mid, max)
+    }
+}
+
+impl MarkovNote {
+    pub fn to_notes(
+        &self,
+        start: u32,
+        channel: u4,
+        vel: u7,
+        quantization: NoteDuration,
+    ) -> Vec<QuantizedNote> {
+        let to_note = |key: u7| -> QuantizedNote {
+            QuantizedNote {
+                key,
+                vel,
+                channel,
+                quantization,
+                start,
+                length: self.length,
+            }
+        };
+        match self.pitches {
+            MarkovNotePitches::One(a) => vec![to_note(a)],
+            MarkovNotePitches::Two(a, b) => vec![to_note(a), to_note(b)],
+            MarkovNotePitches::Three(a, b, c) => vec![to_note(a), to_note(b), to_note(c)],
         }
     }
 }
@@ -369,6 +413,10 @@ pub enum NoteDuration {
 }
 
 impl NoteDuration {
+    pub fn from_beats(&self, beats: u32) -> f32 {
+        beats as f32 * self.beat_factor()
+    }
+
     fn to_beats(&self, num_units: u32) -> f32 {
         num_units as f32 / self.beat_factor()
     }

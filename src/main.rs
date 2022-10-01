@@ -1,18 +1,16 @@
 #![feature(hash_drain_filter)]
+#![feature(let_chains)]
 
 mod notes;
 
-use std::error::Error;
+use std::{collections::BTreeMap, error::Error};
 
 use markov::Chain;
-use midly::{
-    num::{u28, u4, u7},
-    MetaMessage, MidiMessage, TrackEvent, TrackEventKind,
-};
+use midly::{num::u4, MetaMessage, MidiMessage, TrackEvent, TrackEventKind};
 
-use notes::{MidiInfo, Note, NoteDuration, StepSequencer};
+use notes::{MidiInfo, Note, NoteDuration};
 
-use crate::notes::{MarkovNote, QuantizedNote};
+use crate::notes::{MarkovNote, MarkovNotePitches};
 
 const MEGALOVANIA: &str = "Undertale_-_Megalovania.mid";
 // const MEGALOVANIA: &str = "Megalovania Loop.mid";
@@ -56,7 +54,7 @@ fn extract_meta_messages<'a>(track: &[TrackEvent<'a>]) -> (Vec<TrackEvent<'a>>, 
             TrackEventKind::Midi {
                 channel, message, ..
             } => {
-                if let Some(existing_channel) = likely_channel {
+                if let Some(existing_channel) = likely_channel && existing_channel != channel {
                     println!(
                         "[Warning] Track contains multiple channels: {} {}",
                         existing_channel, channel
@@ -75,53 +73,10 @@ fn extract_meta_messages<'a>(track: &[TrackEvent<'a>]) -> (Vec<TrackEvent<'a>>, 
     (events, likely_channel)
 }
 
-fn channel(channel: impl Into<u4>) -> TrackEvent<'static> {
-    TrackEvent {
-        delta: 0.into(),
-        kind: TrackEventKind::Meta(MetaMessage::MidiChannel(channel.into())),
-    }
-}
-
-fn program_change(channel: impl Into<u4>, program: impl Into<u7>) -> TrackEvent<'static> {
-    TrackEvent {
-        delta: 0.into(),
-        kind: TrackEventKind::Midi {
-            channel: channel.into(),
-            message: MidiMessage::ProgramChange {
-                program: program.into(),
-            },
-        },
-    }
-}
-
 fn end_of_track() -> TrackEvent<'static> {
     TrackEvent {
         delta: 19200.into(),
         kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
-    }
-}
-
-fn note(
-    delta: impl Into<u28>,
-    channel: impl Into<u4>,
-    key: impl Into<u7>,
-    on: bool,
-) -> TrackEvent<'static> {
-    TrackEvent {
-        delta: delta.into(),
-        kind: TrackEventKind::Midi {
-            channel: channel.into(),
-            message: match on {
-                true => MidiMessage::NoteOn {
-                    key: key.into(),
-                    vel: 63.into(),
-                },
-                false => MidiMessage::NoteOff {
-                    key: key.into(),
-                    vel: 63.into(),
-                },
-            },
-        },
     }
 }
 
@@ -133,46 +88,74 @@ fn main() -> Result<(), Box<dyn Error>> {
     let midi_info = MidiInfo::new(header, &tracks);
 
     let mut out_tracks = vec![];
-    for track in tracks.iter() {
-        // [&tracks[0], &tracks[1], &tracks[3]].iter() {
+    for track in [&tracks[0], &tracks[1], &tracks[2], &tracks[3]].iter() {
         let quantization = NoteDuration::Eighth;
 
         let (mut meta_messages, likely_channel) = extract_meta_messages(track);
 
-        let markov_notes = Note::from_events(&track)
-            .iter()
-            .map(|x| MarkovNote::from(x.quantize(midi_info, quantization)))
-            .collect::<Vec<MarkovNote>>();
+        let markov_notes = {
+            let mut map = BTreeMap::new();
+            Note::from_events(&track)
+                .iter()
+                .map(|x| {
+                    let note = x.quantize(midi_info, quantization);
+                    (note.start, note)
+                })
+                .for_each(|(start, note)| map.entry(start).or_insert_with(Vec::new).push(note));
 
-        let mut chain = Chain::of_order(2);
+            map.iter()
+                .map(|(_, notes)| {
+                    if notes.len() > 3 {
+                        println!("[Warning] Dropping extra notes {}", notes.len());
+                    }
+                    let a = notes[0];
+                    let b = notes.get(1).cloned();
+                    let c = notes.get(2).cloned();
+                    let length = a.length;
+                    let pitches = match (b, c) {
+                        (None, None) => MarkovNotePitches::one(a.key),
+                        (Some(b), None) => MarkovNotePitches::two(a.key, b.key),
+                        (Some(b), Some(c)) => MarkovNotePitches::three(a.key, b.key, c.key),
+                        (None, Some(_)) => unreachable!(),
+                    };
+                    MarkovNote { pitches, length }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut chain = Chain::of_order(1);
         let markov_notes: Box<dyn Iterator<Item = MarkovNote>> = if markov_notes.is_empty() {
             Box::new(markov_notes.iter().cloned())
         } else {
+            let mut length = 0;
             chain.feed(&markov_notes);
-            Box::new(chain.iter().flatten().take(256))
+            Box::new(chain.iter().flatten().take_while(move |note| {
+                length += note.length;
+                length < quantization.from_beats(32 * 4) as u32
+            }))
         };
 
         let mut notes = vec![];
         let mut start = 0;
         for note in markov_notes {
-            let note = QuantizedNote {
-                key: note.key.into(),
-                vel: 63.into(),
-                channel: likely_channel.unwrap_or(0.into()),
-                quantization,
+            note.to_notes(
                 start,
-                length: note.length,
-            };
+                likely_channel.unwrap_or(0.into()),
+                63.into(),
+                quantization,
+            )
+            .into_iter()
+            .for_each(|note| {
+                let note = Note::from_quantized(midi_info, note);
+                notes.push(note);
+            });
             start += note.length;
-            let quantized = Note::from_quantized(midi_info, note);
-            notes.push(quantized);
         }
 
         let mut out_track = vec![];
         out_track.append(&mut meta_messages);
         out_track.append(&mut Note::to_events(notes));
         out_track.push(end_of_track());
-        // let out_track = track.clone();
         out_tracks.push(out_track);
     }
 
