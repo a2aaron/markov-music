@@ -222,10 +222,6 @@ impl Note {
         }
         events.sort_by(|(start, _), (end, _)| start.cmp(end));
 
-        for event in &events {
-            println!("{:?}", event);
-        }
-
         let mut track_events = vec![];
         for (i, (time, event)) in events.iter().enumerate() {
             let delta = if i != 0 {
@@ -272,12 +268,27 @@ impl Note {
 
 #[derive(Debug, Clone, Copy)]
 pub struct QuantizedNote {
-    key: u7,
-    vel: u7,
-    channel: u4,
-    quantization: NoteDuration,
-    start: u32,
-    length: u32,
+    pub key: u7,
+    pub vel: u7,
+    pub channel: u4,
+    pub quantization: NoteDuration,
+    pub start: u32,
+    pub length: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MarkovNote(pub u8);
+
+impl From<Note> for MarkovNote {
+    fn from(note: Note) -> Self {
+        MarkovNote(note.key.as_int())
+    }
+}
+
+impl From<QuantizedNote> for MarkovNote {
+    fn from(note: QuantizedNote) -> Self {
+        MarkovNote(note.key.as_int())
+    }
 }
 
 #[derive(Debug)]

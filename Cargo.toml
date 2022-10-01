@@ -7,5 +7,6 @@ edition = "2021"
 
 [dependencies]
 derive_more = "0.99.17"
+markov = "1.1.0"
 # Pinned to this commit: https://github.com/a2aaron/midly/commit/62216a6f296d77f10c62008b8dadc02b2804f354
 midly = { git = "https://github.com/a2aaron/midly", rev = "62216a6f296d77f10c62008b8dadc02b2804f354" }

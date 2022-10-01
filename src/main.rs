@@ -1,28 +1,65 @@
 #![feature(hash_drain_filter)]
 
-pub mod notes;
+mod notes;
 
 use std::error::Error;
 
+use markov::Chain;
 use midly::{
     num::{u28, u4, u7},
     MetaMessage, MidiMessage, TrackEvent, TrackEventKind,
 };
+
 use notes::{MidiInfo, Note, NoteDuration, StepSequencer};
 
-// const MEGALOVANIA: &str = "Undertale_-_Megalovania.mid";
-const MEGALOVANIA: &str = "Megalovania Loop.mid";
+use crate::notes::{MarkovNote, QuantizedNote};
+
+const MEGALOVANIA: &str = "Undertale_-_Megalovania.mid";
+// const MEGALOVANIA: &str = "Megalovania Loop.mid";
 // const MEGALOVANIA: &str = "test.mid";
 
-fn debug_print_midi(path: &str) {
-    let raw = std::fs::read(path).unwrap();
-    let (header, tracks) = midly::parse(&raw).unwrap();
+fn debug_print_midi(path: &str) -> Result<(), Box<dyn Error>> {
+    println!("-- FILE {} --", path);
+    let raw = std::fs::read(path)?;
+    let (header, tracks) = midly::parse(&raw)?;
     println!("{:?}", header);
-    for track in tracks {
-        for event in track.unwrap() {
-            println!("{:?}", event);
+    for (i, track) in tracks.enumerate() {
+        println!("-- TRACK {} --", i);
+        for event in track? {
+            let event = event?;
+            match event.kind {
+                TrackEventKind::Midi { message, .. } => match message {
+                    MidiMessage::NoteOff { .. } => continue,
+                    MidiMessage::NoteOn { .. } => continue,
+                    _ => (),
+                },
+                _ => (),
+            }
+            println!("delta = {:?}\t{:?}", event.delta, event.kind);
         }
+        println!("-- END TRACK {} --", i);
     }
+    println!("-- END FILE {} --", path);
+    Ok(())
+}
+
+fn extract_meta_messages<'a>(track: &[TrackEvent<'a>]) -> Vec<TrackEvent<'a>> {
+    track
+        .iter()
+        .cloned()
+        .filter(|event| match event.kind {
+            TrackEventKind::Meta(event) => match event {
+                MetaMessage::EndOfTrack => false,
+                _ => true,
+            },
+            TrackEventKind::Midi { message, .. } => match message {
+                MidiMessage::NoteOff { .. } => false,
+                MidiMessage::NoteOn { .. } => false,
+                _ => true,
+            },
+            _ => false,
+        })
+        .collect()
 }
 
 fn channel(channel: impl Into<u4>) -> TrackEvent<'static> {
@@ -82,22 +119,41 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let midi_info = MidiInfo::new(header, &tracks);
 
-    let mut out_tracks = vec![tracks[0].clone()];
-    for track in tracks.iter() {
-        let notes = Note::from_events(&track);
-        let notes = notes
+    let mut out_tracks = vec![];
+    for track in [&tracks[0], &tracks[1], &tracks[3]].iter() {
+        let mut meta_messages = extract_meta_messages(track);
+
+        let notes = Note::from_events(&track)
             .iter()
-            .map(|note| note.quantize(midi_info, NoteDuration::Quarter))
-            .collect::<Vec<_>>();
-        // let step_sequence = StepSequencer::from_notes(&notes, midi_info, NoteDuration::Sixteenth);
-        // let notes = step_sequence.to_notes();
+            .map(|x| MarkovNote::from(*x))
+            .collect::<Vec<MarkovNote>>();
+
+        let mut chain = Chain::of_order(8);
+        let notes: Box<dyn Iterator<Item = MarkovNote>> = if (notes.is_empty()) {
+            Box::new(notes.iter().cloned())
+        } else {
+            chain.feed(&notes);
+            Box::new(chain.iter().flatten().take(256))
+        };
+
         let notes = notes
-            .iter()
-            .map(|note| Note::from_quantized(midi_info, *note));
+            .enumerate()
+            .map(|(i, x)| {
+                let note = QuantizedNote {
+                    key: x.0.into(),
+                    vel: 63.into(),
+                    channel: 0.into(),
+                    quantization: NoteDuration::Eighth,
+                    start: i as u32,
+                    length: 1,
+                };
+                Note::from_quantized(midi_info, note)
+            })
+            .collect::<Vec<Note>>();
+
         let mut out_track = vec![];
+        out_track.append(&mut meta_messages);
         out_track.append(&mut Note::to_events(notes));
-        out_track.push(note(100, 0, 40, true));
-        out_track.push(note(100, 0, 40, false));
         out_track.push(end_of_track());
         // let out_track = track.clone();
         out_tracks.push(out_track);
@@ -107,9 +163,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut outfile = std::fs::File::create("out.mid")?;
     midly::write_std(&header, &out_tracks, &mut outfile).unwrap();
 
-    debug_print_midi(MEGALOVANIA);
+    debug_print_midi(MEGALOVANIA)?;
     println!("----");
-    debug_print_midi("out.mid");
+    debug_print_midi("out.mid")?;
 
     Ok(())
 }
