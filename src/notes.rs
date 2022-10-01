@@ -277,17 +277,17 @@ pub struct QuantizedNote {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MarkovNote(pub u8);
-
-impl From<Note> for MarkovNote {
-    fn from(note: Note) -> Self {
-        MarkovNote(note.key.as_int())
-    }
+pub struct MarkovNote {
+    pub key: u8,
+    pub length: u32,
 }
 
 impl From<QuantizedNote> for MarkovNote {
     fn from(note: QuantizedNote) -> Self {
-        MarkovNote(note.key.as_int())
+        MarkovNote {
+            key: note.key.as_int(),
+            length: note.length,
+        }
     }
 }
 

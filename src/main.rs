@@ -43,8 +43,9 @@ fn debug_print_midi(path: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn extract_meta_messages<'a>(track: &[TrackEvent<'a>]) -> Vec<TrackEvent<'a>> {
-    track
+fn extract_meta_messages<'a>(track: &[TrackEvent<'a>]) -> (Vec<TrackEvent<'a>>, Option<u4>) {
+    let mut likely_channel = None;
+    let events = track
         .iter()
         .cloned()
         .filter(|event| match event.kind {
@@ -52,14 +53,26 @@ fn extract_meta_messages<'a>(track: &[TrackEvent<'a>]) -> Vec<TrackEvent<'a>> {
                 MetaMessage::EndOfTrack => false,
                 _ => true,
             },
-            TrackEventKind::Midi { message, .. } => match message {
-                MidiMessage::NoteOff { .. } => false,
-                MidiMessage::NoteOn { .. } => false,
-                _ => true,
-            },
+            TrackEventKind::Midi {
+                channel, message, ..
+            } => {
+                if let Some(existing_channel) = likely_channel {
+                    println!(
+                        "[Warning] Track contains multiple channels: {} {}",
+                        existing_channel, channel
+                    )
+                }
+                likely_channel = Some(channel);
+                match message {
+                    MidiMessage::NoteOff { .. } => false,
+                    MidiMessage::NoteOn { .. } => false,
+                    _ => true,
+                }
+            }
             _ => false,
         })
-        .collect()
+        .collect();
+    (events, likely_channel)
 }
 
 fn channel(channel: impl Into<u4>) -> TrackEvent<'static> {
@@ -120,16 +133,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let midi_info = MidiInfo::new(header, &tracks);
 
     let mut out_tracks = vec![];
-    for track in [&tracks[0], &tracks[1], &tracks[3]].iter() {
-        let mut meta_messages = extract_meta_messages(track);
+    for track in tracks.iter() {
+        // [&tracks[0], &tracks[1], &tracks[3]].iter() {
+        let quantization = NoteDuration::Eighth;
+
+        let (mut meta_messages, likely_channel) = extract_meta_messages(track);
 
         let notes = Note::from_events(&track)
             .iter()
-            .map(|x| MarkovNote::from(*x))
+            .map(|x| MarkovNote::from(x.quantize(midi_info, quantization)))
             .collect::<Vec<MarkovNote>>();
 
         let mut chain = Chain::of_order(8);
-        let notes: Box<dyn Iterator<Item = MarkovNote>> = if (notes.is_empty()) {
+        let notes: Box<dyn Iterator<Item = MarkovNote>> = if notes.is_empty() {
             Box::new(notes.iter().cloned())
         } else {
             chain.feed(&notes);
@@ -140,12 +156,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .enumerate()
             .map(|(i, x)| {
                 let note = QuantizedNote {
-                    key: x.0.into(),
+                    key: x.key.into(),
                     vel: 63.into(),
-                    channel: 0.into(),
-                    quantization: NoteDuration::Eighth,
+                    channel: likely_channel.unwrap_or(0.into()),
+                    quantization,
                     start: i as u32,
-                    length: 1,
+                    length: x.length,
                 };
                 Note::from_quantized(midi_info, note)
             })
