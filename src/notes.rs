@@ -1,19 +1,23 @@
-use std::collections::{btree_map, hash_map, BTreeMap, HashMap};
+use std::collections::{hash_map, HashMap};
 
 use derive_more::{Add, AddAssign, From, Sub, SubAssign};
 use midly::{
     num::{u24, u28, u4, u7},
-    Header, MetaMessage, MidiMessage, Timing, TrackEvent, TrackEventKind,
+    Header, MidiMessage, Timing, TrackEvent, TrackEventKind,
 };
 
 #[derive(Debug, Clone, Copy)]
+/// A struct which records the timing information about a midi (specifically, the Tempo and Timing
+/// of the midi).
 pub struct MidiInfo {
     timing: Timing,
-    tempo: Option<u24>,
-    time_sig: Option<TimeSignature>,
+    tempo: u24,
 }
 
 impl MidiInfo {
+    /// Create a new MidiInfo from the given header and set of tracks. This will attempt to find the
+    /// tempo midi messages. If there are multiple, warnings are printed and only the first one is used.
+    /// If no tempo is specified, the tempo defaults to 120 BPM (equal to 500000 ticks per beat)
     pub fn new<'a>(
         header: Header,
         tracks: impl IntoIterator<Item = impl IntoIterator<Item = &'a TrackEvent<'a>>>,
@@ -23,7 +27,6 @@ impl MidiInfo {
             _ => None,
         });
 
-        let mut time_sig = None;
         let mut tempo = None;
         for event in meta_events {
             match event {
@@ -33,63 +36,29 @@ impl MidiInfo {
                             "[Warning] Tempo already set! Old: {:?}, new: {:?}",
                             tempo, new_tempo
                         );
+                    } else {
+                        tempo = Some(new_tempo)
                     }
-                    tempo = Some(new_tempo)
-                }
-                midly::MetaMessage::TimeSignature(
-                    numerator,
-                    denominator,
-                    midi_clocks_per_click,
-                    thirty_second_notes_per_quarter_note,
-                ) => {
-                    let new_time_sig = TimeSignature {
-                        numerator,
-                        denominator,
-                        midi_clocks_per_click,
-                        thirty_second_notes_per_quarter_note,
-                    };
-                    if let Some(time_sig) = time_sig {
-                        println!(
-                            "[Warning] Time signature already set! Old: {:?}, new: {:?}",
-                            time_sig, new_time_sig
-                        )
-                    }
-
-                    time_sig = Some(new_time_sig)
                 }
                 _ => (),
             }
         }
+
+        if tempo.is_none() {
+            println!(
+                "[Warning] No tempo specified, defaulting to 120 BPM (500,000 ticks per beat)"
+            );
+        }
+
         MidiInfo {
             timing: header.timing,
-            tempo,
-            time_sig,
+            tempo: tempo.unwrap_or(u24::from(500000)),
         }
     }
 
-    pub fn tempo_event(&self) -> Option<TrackEvent<'static>> {
-        if let Some(tempo) = self.tempo {
-            Some(TrackEvent {
-                delta: 0.into(),
-                kind: TrackEventKind::Meta(MetaMessage::Tempo(tempo)),
-            })
-        } else {
-            None
-        }
-    }
-
-    pub fn time_signature_event(&self) -> Option<TrackEvent<'static>> {
-        if let Some(time_sig) = self.time_sig {
-            let msg = time_sig.as_meta_message();
-            Some(TrackEvent {
-                delta: 0.into(),
-                kind: TrackEventKind::Meta(msg),
-            })
-        } else {
-            None
-        }
-    }
-
+    /// Convert midi Ticks into beats, using the specified Timing recorded by the MidiInfo. Note that
+    /// if the Midi has Timecode timing, but no Tempo value specified, then this function will panic,
+    /// since it's not possible to determine the right number of beats without it.
     fn to_beats(&self, ticks: Ticks) -> f32 {
         let ticks: f32 = ticks.into();
         match self.timing {
@@ -101,14 +70,7 @@ impl MidiInfo {
                 let fps = fps.as_f32();
                 let ticks_per_frame = ticks_per_frame as f32;
                 let seconds = ticks / fps / ticks_per_frame;
-                if let Some(seconds_per_beat) = self.seconds_per_beat() {
-                    let beats_per_second = 1.0 / seconds_per_beat;
-                    seconds * beats_per_second
-                } else {
-                    // If the tempo wasn't provided, then we do not know how many beats it has been.
-                    // Panic in this scenario.
-                    panic!("Cannot determine beat offset for a Timecode midi with no tempo information!");
-                }
+                seconds / self.seconds_per_beat()
             }
         }
     }
@@ -122,31 +84,28 @@ impl MidiInfo {
             Timing::Timecode(fps, ticks_per_frame) => {
                 let fps = fps.as_f32();
                 let ticks_per_frame = ticks_per_frame as f32;
-                if let Some(seconds_per_beat) = self.seconds_per_beat() {
-                    let seconds = seconds_per_beat * beats;
-                    let ticks = seconds * fps * ticks_per_frame;
-                    Ticks::from(ticks)
-                } else {
-                    // If the tempo wasn't provided, then we do not know how many beats it has been.
-                    // Panic in this scenario.
-                    panic!("Cannot determine beat offset for a Timecode midi with no tempo information!");
-                }
+                let seconds = self.seconds_per_beat() * beats;
+                let ticks = seconds * fps * ticks_per_frame;
+                Ticks::from(ticks)
             }
         }
     }
 
-    fn seconds_per_beat(&self) -> Option<f32> {
+    /// Get the number of seconds per beat that this Midi file specifies. This is based off of the
+    /// given tempo value.
+    fn seconds_per_beat(&self) -> f32 {
         // Note: tempo is in microseconds per beat (so a value of 1,000,000 equals 1 second per beat)
         // To convert to BPM, the conversion is 60 / (tempo / 1,000,000)
         // For example, the Megalovania MIDI has a tempo value of 260,870 microseconds per beat.
         // This equals 260,870 / 1,000,000 = 0.26087 seconds per beat
         // or 60 / 0.26087 = 229.99996 -> 230 beats per minute.
-        self.tempo
-            .map(|tempo| (tempo.as_int() as f32) / 1_000_000.0)
+        self.tempo.as_int() as f32 / 1_000_000.0
     }
 }
 
 #[derive(Debug, Clone, Copy)]
+/// A midi note, represented with a start time and length. Note that midi does not really have a notion
+/// of "notes"--instead there are just NoteOn and NoteOff events.
 pub struct Note {
     key: u7,
     vel: u7,
@@ -156,6 +115,11 @@ pub struct Note {
 }
 
 impl Note {
+    /// Attempt to turn a set of TrackEvents into a set of Notes. A note is created whenever a NoteOn
+    /// event of a specific key is later followed by a NoteOff event of the same key. The Note will
+    /// be considered to start at the NoteOn event and end at the NoteOff event. The velocity
+    /// will be equal to the NoteOn event's velocity. NoteOff events without a corresponding NoteOn
+    /// event are dropped, as are NoteOn events that have no corresponding NoteOff event.
     pub fn from_events(events: &[TrackEvent]) -> Vec<Note> {
         let mut notes = vec![];
         let mut ticks = Ticks::from(0);
@@ -238,6 +202,8 @@ impl Note {
         track_events
     }
 
+    /// Quantize a note to the given qunatization level. Both the start time and length of the note
+    /// are quantized.
     pub fn quantize(&self, midi_info: MidiInfo, quantization: NoteDuration) -> QuantizedNote {
         QuantizedNote {
             key: self.key,
@@ -255,6 +221,7 @@ impl Note {
         }
     }
 
+    /// Convert a QuantizedNote to a Note using the given midi_info.
     pub fn from_quantized(midi_info: MidiInfo, note: QuantizedNote) -> Self {
         Self {
             key: note.key,
@@ -267,6 +234,8 @@ impl Note {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// A QuantizedNote is similar to a Note, but it's start and length values are quantized to some
+/// NoteDuration, rather than ticks.
 pub struct QuantizedNote {
     pub key: u7,
     pub vel: u7,
@@ -277,39 +246,25 @@ pub struct QuantizedNote {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A MarkovNote is a note which can be fed to the markov chain. A MarkovNote denotes up to three
+/// simultaneous pitches, all of which have some equal, specified length. The length is assumed to
+/// be in some NoteDuration.
 pub struct MarkovNote {
-    pub pitches: MarkovNotePitches,
+    pitches: MarkovNotePitches,
     pub length: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MarkovNotePitches {
-    One(u7),
-    Two(u7, u7),
-    Three(u7, u7, u7),
-}
-
-impl MarkovNotePitches {
-    pub fn one(a: u7) -> MarkovNotePitches {
-        MarkovNotePitches::One(a)
-    }
-
-    pub fn two(a: u7, b: u7) -> MarkovNotePitches {
-        let (lower, higher) = if a <= b { (a, b) } else { (b, a) };
-        MarkovNotePitches::Two(lower, higher)
-    }
-
-    pub fn three(a: u7, b: u7, c: u7) -> MarkovNotePitches {
-        let [min, mid, max] = {
-            let mut arr = [a, b, c];
-            arr.sort();
-            arr
-        };
-        MarkovNotePitches::Three(min, mid, max)
-    }
-}
-
 impl MarkovNote {
+    pub fn new(a: u7, b: Option<u7>, c: Option<u7>, length: u32) -> MarkovNote {
+        let pitches = match (b, c) {
+            (None, None) => MarkovNotePitches::one(a),
+            (Some(b), None) => MarkovNotePitches::two(a, b),
+            (Some(b), Some(c)) => MarkovNotePitches::three(a, b, c),
+            (None, Some(_)) => unreachable!(),
+        };
+        MarkovNote { pitches, length }
+    }
+
     pub fn to_notes(
         &self,
         start: u32,
@@ -335,73 +290,35 @@ impl MarkovNote {
     }
 }
 
-#[derive(Debug)]
-pub struct StepSequencer {
-    notes: BTreeMap<u32, Vec<u7>>,
-    quantization: NoteDuration,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MarkovNotePitches {
+    One(u7),
+    Two(u7, u7),
+    Three(u7, u7, u7),
 }
-impl StepSequencer {
-    pub fn from_notes(
-        notes: &[Note],
-        midi_info: MidiInfo,
-        quantization: NoteDuration,
-    ) -> StepSequencer {
-        let notes: Vec<_> = notes
-            .iter()
-            .map(|note| note.quantize(midi_info, quantization))
-            .collect();
 
-        let mut map = BTreeMap::new();
-        for note in notes {
-            for i in note.start..note.start + note.length {
-                match map.entry(i) {
-                    btree_map::Entry::Vacant(entry) => {
-                        entry.insert(vec![note.key]);
-                    }
-                    btree_map::Entry::Occupied(mut entry) => entry.get_mut().push(note.key),
-                }
-            }
-        }
-
-        StepSequencer {
-            notes: map,
-            quantization,
-        }
+impl MarkovNotePitches {
+    pub fn one(a: u7) -> MarkovNotePitches {
+        MarkovNotePitches::One(a)
     }
 
-    pub fn get_notes(&self, step: u32) -> Vec<u7> {
-        self.notes.get(&step).cloned().unwrap_or(vec![])
+    pub fn two(a: u7, b: u7) -> MarkovNotePitches {
+        let (lower, higher) = if a <= b { (a, b) } else { (b, a) };
+        MarkovNotePitches::Two(lower, higher)
     }
 
-    pub fn to_notes(&self) -> Vec<QuantizedNote> {
-        let mut quantized_notes = vec![];
-        let mut active_notes = HashMap::<u7, u32>::new();
-        for (&step, notes) in self.notes.iter() {
-            for &key in notes {
-                if let hash_map::Entry::Vacant(entry) = active_notes.entry(key) {
-                    entry.insert(step);
-                } else {
-                    for (_, start) in
-                        active_notes.drain_filter(|&active_note, _| key != active_note)
-                    {
-                        let note = QuantizedNote {
-                            key,
-                            vel: u7::max_value(),
-                            channel: u4::new(0),
-                            quantization: self.quantization,
-                            start,
-                            length: step - start,
-                        };
-                        quantized_notes.push(note);
-                    }
-                }
-            }
-        }
-        quantized_notes
+    pub fn three(a: u7, b: u7, c: u7) -> MarkovNotePitches {
+        let [min, mid, max] = {
+            let mut arr = [a, b, c];
+            arr.sort();
+            arr
+        };
+        MarkovNotePitches::Three(min, mid, max)
     }
 }
 
 #[derive(Debug, Clone, Copy)]
+/// A unit of time in some note duration.
 pub enum NoteDuration {
     Whole,
     Half,
@@ -413,10 +330,26 @@ pub enum NoteDuration {
 }
 
 impl NoteDuration {
+    /// Convert beats to the NoteDuration unit. For example, 3 beats is equal to the following:
+    /// - 0.75 Whole notes
+    /// - 1.5 Half notes
+    /// - 3 Quater notes
+    /// - 6 Eighth notes
+    /// - 12 Sixteenth notes
+    /// - 24 ThirtySecond notes
+    /// - 48 SixtyFourth notes
     pub fn from_beats(&self, beats: usize) -> f32 {
         beats as f32 * self.beat_factor()
     }
 
+    /// Convert from the NoteDuration unit to beats. For example:
+    /// 1 Whole note = 4.0 beats
+    /// 1 Half note = 2.0 beats
+    /// 1 Quater note = 1.0 beats
+    /// 1 Eighth note = 0.5 beats
+    /// 1 Sixteenth note = 0.25 beats
+    /// 1 ThirtySecond note = 0.125 beats
+    /// 1 SixtyFourth note = 0.0625 beats
     fn to_beats(&self, num_units: u32) -> f32 {
         num_units as f32 / self.beat_factor()
     }
@@ -434,37 +367,13 @@ impl NoteDuration {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TimeSignature {
-    numerator: u8,
-    denominator: u8,
-    midi_clocks_per_click: u8,
-    thirty_second_notes_per_quarter_note: u8,
-}
-
-impl TimeSignature {
-    fn as_meta_message(&self) -> MetaMessage<'static> {
-        MetaMessage::TimeSignature(
-            self.numerator,
-            self.denominator,
-            self.midi_clocks_per_click,
-            self.thirty_second_notes_per_quarter_note,
-        )
-    }
-}
-
 #[derive(
     From, Add, AddAssign, Sub, SubAssign, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug,
 )]
+/// Wrapper struct for the Midi Tick unit.
 struct Ticks(u32);
 impl Ticks {
-    fn quantize_to_ticks(&self, midi_info: MidiInfo, duration: NoteDuration) -> Ticks {
-        let beats = midi_info.to_beats(*self);
-        let factor = duration.beat_factor();
-        let beats = (beats * factor).trunc() / factor;
-        midi_info.to_ticks(beats)
-    }
-
+    // Convert from Ticks to NoteDuration units
     fn to_duration_units(&self, midi_info: MidiInfo, duration: NoteDuration) -> f32 {
         let beats = midi_info.to_beats(*self);
         let factor = duration.beat_factor();
