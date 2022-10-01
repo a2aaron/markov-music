@@ -413,7 +413,7 @@ pub enum NoteDuration {
 }
 
 impl NoteDuration {
-    pub fn from_beats(&self, beats: u32) -> f32 {
+    pub fn from_beats(&self, beats: usize) -> f32 {
         beats as f32 * self.beat_factor()
     }
 
