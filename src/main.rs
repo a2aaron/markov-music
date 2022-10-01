@@ -139,33 +139,34 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let (mut meta_messages, likely_channel) = extract_meta_messages(track);
 
-        let notes = Note::from_events(&track)
+        let markov_notes = Note::from_events(&track)
             .iter()
             .map(|x| MarkovNote::from(x.quantize(midi_info, quantization)))
             .collect::<Vec<MarkovNote>>();
 
-        let mut chain = Chain::of_order(8);
-        let notes: Box<dyn Iterator<Item = MarkovNote>> = if notes.is_empty() {
-            Box::new(notes.iter().cloned())
+        let mut chain = Chain::of_order(2);
+        let markov_notes: Box<dyn Iterator<Item = MarkovNote>> = if markov_notes.is_empty() {
+            Box::new(markov_notes.iter().cloned())
         } else {
-            chain.feed(&notes);
+            chain.feed(&markov_notes);
             Box::new(chain.iter().flatten().take(256))
         };
 
-        let notes = notes
-            .enumerate()
-            .map(|(i, x)| {
-                let note = QuantizedNote {
-                    key: x.key.into(),
-                    vel: 63.into(),
-                    channel: likely_channel.unwrap_or(0.into()),
-                    quantization,
-                    start: i as u32,
-                    length: x.length,
-                };
-                Note::from_quantized(midi_info, note)
-            })
-            .collect::<Vec<Note>>();
+        let mut notes = vec![];
+        let mut start = 0;
+        for note in markov_notes {
+            let note = QuantizedNote {
+                key: note.key.into(),
+                vel: 63.into(),
+                channel: likely_channel.unwrap_or(0.into()),
+                quantization,
+                start,
+                length: note.length,
+            };
+            start += note.length;
+            let quantized = Note::from_quantized(midi_info, note);
+            notes.push(quantized);
+        }
 
         let mut out_track = vec![];
         out_track.append(&mut meta_messages);
