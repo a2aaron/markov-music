@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::{collections::BTreeMap, error::Error};
 
 use markov::Chain;
@@ -79,97 +78,84 @@ fn end_of_track() -> TrackEvent<'static> {
     }
 }
 
-pub fn generate_markov(
-    path: impl AsRef<Path>,
-    out_path: impl AsRef<Path>,
-    track_indicies: &[usize],
+pub fn generate_markov<'a>(
+    midi_info: MidiInfo,
+    track: &[TrackEvent<'a>],
     quantization: NoteDuration,
     order: usize,
     measures: usize,
-) -> Result<(), Box<dyn Error>> {
-    let raw = std::fs::read(path)?;
-    let (mut header, tracks) = midly::parse(&raw)?;
-    let tracks = tracks.collect_tracks()?;
+) -> Vec<TrackEvent<'a>> {
+    let (mut meta_messages, likely_channel) = extract_meta_messages(&track);
 
-    let midi_info = MidiInfo::new(header, &tracks);
+    let markov_notes = {
+        // Quantize notes and place them into a map whose keys are the start times.
+        let mut map = BTreeMap::new();
+        Note::from_events(&track)
+            .iter()
+            .map(|x| {
+                let note = x.quantize(midi_info, quantization);
+                (note.start, note)
+            })
+            .for_each(|(start, note)| map.entry(start).or_insert_with(Vec::new).push(note));
 
-    let mut out_tracks = vec![];
-    for &i in track_indicies {
-        let track = &tracks[i];
-        let (mut meta_messages, likely_channel) = extract_meta_messages(track);
+        // Then extract the notes from the map, grouped by the start time key, and convert them
+        // to MarkovNotes. This ultimately has the effect of producing a list of MarkovNotes, ordered
+        // by start time.
+        map.iter()
+            .map(|(_, notes)| {
+                if notes.len() > 3 {
+                    println!(
+                        "[Warning] Dropping extra notes (total: {}, can only accomodate 3)",
+                        notes.len()
+                    );
+                }
+                let length = notes[0].length;
+                let a = notes[0].key;
+                let b = notes.get(1).cloned().map(|note| note.key);
+                let c = notes.get(2).cloned().map(|note| note.key);
+                MarkovNote::new(a, b, c, length)
+            })
+            .collect::<Vec<_>>()
+    };
 
-        let markov_notes = {
-            // Quantize notes and place them into a map whose keys are the start times.
-            let mut map = BTreeMap::new();
-            Note::from_events(&track)
-                .iter()
-                .map(|x| {
-                    let note = x.quantize(midi_info, quantization);
-                    (note.start, note)
-                })
-                .for_each(|(start, note)| map.entry(start).or_insert_with(Vec::new).push(note));
+    // Do chain generation, if the chain has any notes. Note that, for some reason, the markov
+    // crate panics if nothing has been fed to it ever, so we must skip generation if there are
+    // no notes to feed.
+    let mut chain = Chain::of_order(order);
+    let markov_notes: Box<dyn Iterator<Item = MarkovNote>> = if markov_notes.is_empty() {
+        Box::new(markov_notes.iter().cloned())
+    } else {
+        let mut length = 0;
+        chain.feed(&markov_notes);
+        Box::new(chain.iter().flatten().take_while(move |note| {
+            length += note.length;
+            length < quantization.from_beats(measures * 4) as u32
+        }))
+    };
 
-            // Then extract the notes from the map, grouped by the start time key, and convert them
-            // to MarkovNotes. This ultimately has the effect of producing a list of MarkovNotes, ordered
-            // by start time.
-            map.iter()
-                .map(|(_, notes)| {
-                    if notes.len() > 3 {
-                        println!("[Warning] Dropping extra notes {}", notes.len());
-                    }
-                    let length = notes[0].length;
-                    let a = notes[0].key;
-                    let b = notes.get(1).cloned().map(|note| note.key);
-                    let c = notes.get(2).cloned().map(|note| note.key);
-                    MarkovNote::new(a, b, c, length)
-                })
-                .collect::<Vec<_>>()
-        };
-
-        // Do chain generation, if the chain has any notes. Note that, for some reason, the markov
-        // crate panics if nothing has been fed to it ever, so we must skip generation if there are
-        // no notes to feed.
-        let mut chain = Chain::of_order(order);
-        let markov_notes: Box<dyn Iterator<Item = MarkovNote>> = if markov_notes.is_empty() {
-            Box::new(markov_notes.iter().cloned())
-        } else {
-            let mut length = 0;
-            chain.feed(&markov_notes);
-            Box::new(chain.iter().flatten().take_while(move |note| {
-                length += note.length;
-                length < quantization.from_beats(measures * 4) as u32
-            }))
-        };
-
-        // Finally, turn the MarkovNotes back into regular Notes
-        let mut notes = vec![];
-        let mut start = 0;
-        for note in markov_notes {
-            note.to_notes(
-                start,
-                likely_channel.unwrap_or(0.into()),
-                63.into(),
-                quantization,
-            )
-            .into_iter()
-            .for_each(|note| {
-                let note = Note::from_quantized(midi_info, note);
-                notes.push(note);
-            });
-            start += note.length;
-        }
-
-        // Write out the events for the track, first sticking the meta messages in, then the notes events
-        // and then finally an end of track event.
-        let mut out_track = vec![];
-        out_track.append(&mut meta_messages);
-        out_track.append(&mut Note::to_events(notes));
-        out_track.push(end_of_track());
-        out_tracks.push(out_track);
+    // Finally, turn the MarkovNotes back into regular Notes
+    let mut notes = vec![];
+    let mut start = 0;
+    for note in markov_notes {
+        note.to_notes(
+            start,
+            likely_channel.unwrap_or(0.into()),
+            63.into(),
+            quantization,
+        )
+        .into_iter()
+        .for_each(|note| {
+            let note = Note::from_quantized(midi_info, note);
+            notes.push(note);
+        });
+        start += note.length;
     }
 
-    header.format = midly::Format::Parallel;
-    let mut outfile = std::fs::File::create(out_path)?;
-    midly::write_std(&header, &out_tracks, &mut outfile)?;
-    Ok(())
+    // Write out the events for the track, first sticking the meta messages in, then the notes events
+    // and then finally an end of track event.
+    let mut out_track = vec![];
+    out_track.append(&mut meta_messages);
+    out_track.append(&mut Note::to_events(notes));
+    out_track.push(end_of_track());
+    out_track
 }

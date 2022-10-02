@@ -1,5 +1,6 @@
 use std::collections::{hash_map, HashMap};
 
+use clap::ValueEnum;
 use derive_more::{Add, AddAssign, From, Sub, SubAssign};
 use midly::{
     num::{u24, u28, u4, u7},
@@ -317,7 +318,7 @@ impl MarkovNotePitches {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 /// A unit of time in some note duration.
 pub enum NoteDuration {
     Whole,
