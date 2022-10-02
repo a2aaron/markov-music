@@ -21,10 +21,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     //     32,
     // )
 
-    for order in 1..=7 {
-        let order = order;
-        println!("Order {}", order);
-        samples::markov_mp3("ghost_low.mp3", &format!("ghost_low_{}.wav", order), order)?;
+    for name in ["miserable", "ghost", "celeste"] {
+        for order in 1..=8 {
+            for power in [8, 10, 12, 14, 16] {
+                let range = 2usize.pow(power);
+                let order = order;
+                let states = power as usize * order;
+                if states > 64 {
+                    continue;
+                }
+                println!("Order {}", order);
+                samples::markov_mp3(
+                    &format!("{}.mp3", name),
+                    &format!(
+                        "outputs/{}_order_{}_range_{}_({}_states).wav",
+                        name, order, power, states
+                    ),
+                    order,
+                    range,
+                )?;
+            }
+        }
     }
 
     Ok(())
