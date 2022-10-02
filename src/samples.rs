@@ -1,4 +1,4 @@
-use std::{error::Error, io::Read};
+use std::{error::Error, io::Read, path::Path};
 
 use markov::{Chain, Chainable};
 use minimp3::{Decoder as Mp3Decoder, Frame};
@@ -81,8 +81,8 @@ fn constrain_to_range(x: i16, max_range: usize) -> usize {
 }
 
 pub fn markov_mp3(
-    in_path: &str,
-    out_path: &str,
+    in_path: impl AsRef<Path>,
+    out_path: impl AsRef<Path>,
     order: usize,
     max_range: usize,
 ) -> Result<(), Box<dyn Error>> {

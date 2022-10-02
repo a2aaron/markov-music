@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::{collections::BTreeMap, error::Error};
 
 use markov::Chain;
@@ -79,8 +80,8 @@ fn end_of_track() -> TrackEvent<'static> {
 }
 
 pub fn generate_markov(
-    path: &str,
-    out_path: &str,
+    path: impl AsRef<Path>,
+    out_path: impl AsRef<Path>,
     track_indicies: &[usize],
     quantization: NoteDuration,
     order: usize,
