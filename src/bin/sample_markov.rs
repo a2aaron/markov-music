@@ -1,7 +1,10 @@
 use std::{error::Error, io::Read};
 
 use clap::{command, Parser, ValueEnum};
-use markov_music::samples::markov_samples;
+use markov_music::{
+    samples::markov_samples,
+    wavelet::{wavelet_transform, wavelet_untransform},
+};
 use minimp3::Decoder;
 use wav::WAV_FORMAT_PCM;
 
@@ -19,11 +22,11 @@ struct Args {
     /// Recommended values are betwee 3 and 8, depending on the length and type of input file.
     #[arg(short = 'O', long, default_value_t = 3)]
     order: usize,
-    /// Bit depth. This is sets the range of allowed values that the samples may take on.
-    /// Higher values result in nicer sounding output, but are more likely to be deterministic.
-    /// Often, setting the order to a lower value cancels out setting the depth to a higher value.
-    /// Note that this does not actually affect the bit-depth of the output WAV file, which is always
-    /// 16 bits. Recommended values are between 8 and 16.
+    /// Bit depth. Only compatible with sample mode. This is sets the range of allowed values that
+    /// the samples may take on. Higher values result in nicer sounding output, but are more likely
+    /// to be deterministic. Often, setting the order to a lower value cancels out setting the depth
+    /// to a higher value. Note that this does not actually affect the bit-depth of the output WAV
+    /// file, which is always 16 bits. Recommended values are between 8 and 16.
     #[arg(short, long, default_value_t = 14)]
     depth: u32,
     /// Length, in seconds, of audio to generate.
@@ -32,6 +35,16 @@ struct Args {
     /// Which channel of the mp3 to use.
     #[arg(short, long, value_enum, default_value_t = Channel::Left)]
     channel: Channel,
+    /// What generation mode to use. "sample" means the markov chain directly generates audio samples,
+    /// while "wavelet" means the markov chain will generate wavelet coefficents.
+    #[arg(short, long, value_enum, default_value_t = Mode::Sample)]
+    mode: Mode,
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum Mode {
+    Sample,
+    Wavelet,
 }
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
@@ -88,15 +101,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         Channel::Right => right,
     };
 
-    println!(
-        "Generating markov chain with order = {}, depth = {} (total states = 2^{})",
-        args.order,
-        args.depth,
-        args.order * args.depth as usize
-    );
+    let samples = match args.mode {
+        Mode::Sample => {
+            println!(
+                "Generating markov chain with order = {}, depth = {} (total states = 2^{})",
+                args.order,
+                args.depth,
+                args.order * args.depth as usize
+            );
 
-    let max_range = 2usize.pow(args.depth);
-    let samples = markov_samples(&samples, args.order, max_range, args.length * sample_rate);
+            let max_range = 2usize.pow(args.depth);
+            let samples =
+                markov_samples(&samples, args.order, max_range, args.length * sample_rate);
+            samples
+        }
+        Mode::Wavelet => {
+            let samples = samples.iter().map(|x| *x as f32).collect();
+            let (hi_passes, lowest_pass) = wavelet_transform(&samples, 1);
+            let samples = wavelet_untransform(&hi_passes, &lowest_pass);
+            let samples = samples.iter().map(|x| *x as i16).collect();
+
+            samples
+        }
+    };
 
     let wav_header = wav::header::Header::new(WAV_FORMAT_PCM, 1, sample_rate as u32, 16);
     let track = wav::BitDepth::Sixteen(samples);
