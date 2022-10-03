@@ -46,6 +46,9 @@ struct Args {
     /// while "wavelet" means the markov chain will generate wavelet coefficents.
     #[arg(short, long, value_enum, default_value_t = Mode::Sample)]
     mode: Mode,
+    /// Enable debug mode.
+    #[arg(long)]
+    debug: bool,
 }
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
@@ -175,7 +178,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let b = rand::random::<usize>() % target.len();
                             lower = a.min(b);
                             upper = a.max(b);
-                            if upper - lower < target.len() / 16 {
+                            if upper - lower < target.len() / 64 || target.len() / 64 == 0 {
                                 break;
                             }
                         }
@@ -184,51 +187,53 @@ fn main() -> Result<(), Box<dyn Error>> {
                     target[lower..=upper].fill(0.0);
                 }
             }
-            println!("Layers: {}, Wavelet: {:?}", args.levels, args.wavelet);
             let orig_samples = orig_samples
                 .iter()
                 .map(|x| (*x as Sample) / i16::MAX as Sample)
                 .collect();
-            let (hi_passes, lowest_pass, low_passes) =
+            let (mut hi_passes, mut lowest_pass, low_passes) =
                 wavelet_transform(&orig_samples, args.levels, args.wavelet);
-            // hi_passes.iter_mut().for_each(|x| chaos_zero(x, 0));
-            // chaos_zero(&mut lowest_pass, 0);
+            hi_passes.iter_mut().for_each(|x| chaos_zero(x, 64));
+            chaos_zero(&mut lowest_pass, 64);
             let samples = wavelet_untransform(&hi_passes, &lowest_pass, args.wavelet);
 
-            println!(
-                "Max error: {}",
-                orig_samples
+            if args.debug {
+                println!("Layers: {}, Wavelet: {:?}", args.levels, args.wavelet);
+
+                println!(
+                    "Max error: {}",
+                    orig_samples
+                        .iter()
+                        .zip(samples.iter())
+                        .map(|(a, b)| (a - b).abs())
+                        .reduce(Sample::max)
+                        .unwrap(),
+                );
+
+                let error_sum = orig_samples
                     .iter()
                     .zip(samples.iter())
                     .map(|(a, b)| (a - b).abs())
-                    .reduce(Sample::max)
-                    .unwrap(),
-            );
+                    .sum::<Sample>();
+                println!("Sum of absolute error: {}", error_sum);
+                println!(
+                    "Average error per sample: {}\n",
+                    error_sum / orig_samples.len() as Sample
+                );
 
-            let error_sum = orig_samples
-                .iter()
-                .zip(samples.iter())
-                .map(|(a, b)| (a - b).abs())
-                .sum::<Sample>();
-            println!("Sum of absolute error: {}", error_sum);
-            println!(
-                "Average error per sample: {}\n",
-                error_sum / orig_samples.len() as Sample
-            );
-
-            let samples = samples
-                .iter()
-                .chain(low_passes.iter().flatten())
-                .chain(hi_passes.iter().flatten())
-                .cloned();
-
-            // .chain(hi_passes.iter().flatten());
-
-            let samples = samples
-                .map(|x| (x * i16::MAX as Sample / 4.0) as i16)
-                .collect();
-
-            samples
+                samples
+                    .iter()
+                    .chain(low_passes.iter().flatten())
+                    .chain(hi_passes.iter().flatten())
+                    .cloned()
+                    .map(|x| (x * i16::MAX as Sample / 4.0) as i16)
+                    .collect()
+            } else {
+                samples
+                    .iter()
+                    .map(|x| (x * i16::MAX as Sample / 4.0) as i16)
+                    .collect()
+            }
         }
     };
 

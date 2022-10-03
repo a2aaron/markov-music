@@ -45,6 +45,33 @@ impl WaveletType {
             stride: 2,
         }
     }
+
+    fn inverse_filter(&self) -> Convolution {
+        let filter = self.filter().filter;
+        let filter = (0..filter.len())
+            .map(|i| {
+                if i % 2 == 0 {
+                    filter[filter.len() - i - 2]
+                } else {
+                    filter[i]
+                }
+            })
+            .collect();
+
+        // Choice of centering on 2 here for Daub4 is because of Numerical Recipes
+        // See 13.10 Wavelet Transforms, page 705.
+        // http://numerical.recipes/book/book.html
+        let centered_on = match self {
+            WaveletType::Haar => 0,
+            WaveletType::Daubechies4 => 2,
+        };
+        Convolution {
+            filter,
+            centered_on,
+            edge_behavior: EdgeBehavior::WrapAround,
+            stride: 2,
+        }
+    }
 }
 
 struct Convolution {
@@ -95,19 +122,6 @@ impl Convolution {
             .rev()
             .enumerate()
             .map(|(i, x)| if i % 2 == 0 { *x } else { -x })
-            .collect();
-        Convolution { filter, ..*self }
-    }
-
-    fn invert(&self) -> Convolution {
-        let filter = (0..self.filter.len())
-            .map(|i| {
-                if i % 2 == 0 {
-                    self.filter[self.filter.len() - i - 2]
-                } else {
-                    self.filter[i]
-                }
-            })
             .collect();
         Convolution { filter, ..*self }
     }
@@ -168,15 +182,7 @@ fn upsample(low_signal: &Signal, high_signal: &Signal, wavelet: WaveletType) -> 
     assert!(low_signal.len() == high_signal.len());
     let interleave = interleave_exact(low_signal, high_signal).cloned().collect();
 
-    let mut filter = wavelet.filter().invert();
-
-    // Choice of centering on 2 here for both signals is because of Numerical Recipes
-    // See 13.10 Wavelet Transforms, page 705.
-    // http://numerical.recipes/book/book.html
-    match wavelet {
-        WaveletType::Haar => (),
-        WaveletType::Daubechies4 => filter.centered_on = 2,
-    }
+    let filter = wavelet.inverse_filter();
 
     let low_signal = low_pass(&interleave, &filter);
     let high_signal = high_pass(&interleave, &filter);
