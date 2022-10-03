@@ -12,4 +12,5 @@ markov = "1.1.0"
 # Pinned to this commit: https://github.com/a2aaron/midly/commit/62216a6f296d77f10c62008b8dadc02b2804f354
 midly = { git = "https://github.com/a2aaron/midly", rev = "62216a6f296d77f10c62008b8dadc02b2804f354" }
 minimp3 = "0.5.1"
+rand = "0.8.5"
 wav = "1.0.0"
