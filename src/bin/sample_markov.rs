@@ -46,10 +46,6 @@ struct Args {
     /// while "wavelet" means the markov chain will generate wavelet coefficents.
     #[arg(short, long, value_enum, default_value_t = Mode::Sample)]
     mode: Mode,
-    #[arg(short, long)]
-    forward: usize,
-    #[arg(short, long)]
-    back: usize,
 }
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
@@ -188,19 +184,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     target[lower..=upper].fill(0.0);
                 }
             }
-            println!(
-                "Layers: {}, Wavelet: {:?}, Forward/Backward: {}/{}",
-                args.levels, args.wavelet, args.forward, args.back
-            );
+            println!("Layers: {}, Wavelet: {:?}", args.levels, args.wavelet);
             let orig_samples = orig_samples
                 .iter()
                 .map(|x| (*x as Sample) / i16::MAX as Sample)
                 .collect();
             let (hi_passes, lowest_pass, low_passes) =
-                wavelet_transform(&orig_samples, args.levels, args.wavelet, args.forward);
+                wavelet_transform(&orig_samples, args.levels, args.wavelet);
             // hi_passes.iter_mut().for_each(|x| chaos_zero(x, 0));
             // chaos_zero(&mut lowest_pass, 0);
-            let samples = wavelet_untransform(&hi_passes, &lowest_pass, args.wavelet, args.back);
+            let samples = wavelet_untransform(&hi_passes, &lowest_pass, args.wavelet);
 
             println!(
                 "Max error: {}",
