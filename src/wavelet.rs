@@ -18,6 +18,10 @@ pub enum WaveletType {
     Haar,
     #[value(alias("daub4"))]
     Daubechies4,
+    #[value(alias("daub12"))]
+    Daubechies12,
+    #[value(alias("daub20"))]
+    Daubechies20,
 }
 
 impl WaveletType {
@@ -37,6 +41,44 @@ impl WaveletType {
                     (1.0 - root_3) / four_times_root_2,
                 ]
             }
+            // Numerical constants taken from http://numerical.recipes/book/book.html
+            // See 13.10 Wavelet Transforms, page 705.
+            WaveletType::Daubechies12 => vec![
+                0.111540743350,
+                0.494623890398,
+                0.751133908021,
+                0.315250351709,
+                -0.226264693965,
+                -0.129766867567,
+                0.097501605587,
+                0.027522865530,
+                -0.031582039318,
+                0.000553842201,
+                0.004777257511,
+                -0.001077301085,
+            ],
+            WaveletType::Daubechies20 => vec![
+                0.026670057901,
+                0.188176800078,
+                0.527201188932,
+                0.688459039454,
+                0.281172343661,
+                -0.249846424327,
+                -0.195946274377,
+                0.127369340336,
+                0.093057364604,
+                -0.071394147166,
+                -0.029457536822,
+                0.033212674059,
+                0.003606553567,
+                -0.010733175483,
+                0.001395351747,
+                0.001992405295,
+                -0.000685856695,
+                -0.000116466855,
+                0.000093588670,
+                -0.000013264203,
+            ],
         };
         Convolution {
             filter,
@@ -61,9 +103,12 @@ impl WaveletType {
         // Choice of centering on 2 here for Daub4 is because of Numerical Recipes
         // See 13.10 Wavelet Transforms, page 705.
         // http://numerical.recipes/book/book.html
+        // In general it seems like the correct centering choice is filter length - 2?
         let centered_on = match self {
             WaveletType::Haar => 0,
             WaveletType::Daubechies4 => 2,
+            WaveletType::Daubechies12 => 10,
+            WaveletType::Daubechies20 => 18,
         };
         Convolution {
             filter,

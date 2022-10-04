@@ -3,6 +3,7 @@
 #![feature(iter_intersperse)]
 #![feature(mixed_integer_ops)]
 
+pub mod chaos;
 pub mod midi;
 pub mod notes;
 pub mod samples;

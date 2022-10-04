@@ -2,11 +2,11 @@ use std::{error::Error, io::Read};
 
 use clap::{command, Parser, ValueEnum};
 use markov_music::{
+    chaos::{chaos_copy, chaos_zero},
     samples::markov_samples,
     wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType},
 };
 use minimp3::Decoder;
-use rand::seq::SliceRandom;
 use wav::WAV_FORMAT_PCM;
 
 #[derive(Parser, Debug)]
@@ -130,71 +130,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             samples
         }
         Mode::Wavelet => {
-            #[allow(dead_code)]
-            fn chaos_copy(target: &mut [Sample], layers: &[Vec<Sample>]) {
-                let mut i = 0;
-                loop {
-                    let random_layer = layers.choose(&mut rand::thread_rng()).unwrap();
-                    for j in 0..random_layer.len() {
-                        if let Some(element) = target.get_mut(i) {
-                            *element = random_layer[j];
-                            i += 1;
-                        } else {
-                            return;
-                        }
-                    }
-                }
-            }
-            #[allow(dead_code)]
-            fn chaos_reverse(target: &mut [Sample], chaos_level: usize) {
-                for _ in 0..chaos_level {
-                    let (lower, upper) = {
-                        let mut lower;
-                        let mut upper;
-                        loop {
-                            let a = rand::random::<usize>() % target.len();
-                            let b = rand::random::<usize>() % target.len();
-                            lower = a.min(b);
-                            upper = a.max(b);
-                            if upper - lower > target.len() / 16 {
-                                break;
-                            }
-                        }
-                        (lower, upper)
-                    };
-                    let mut slice = target[lower..=upper].to_vec();
-                    slice.reverse();
-                    target[lower..=upper].clone_from_slice(&slice);
-                }
-            }
-            #[allow(dead_code)]
-            fn chaos_zero(target: &mut [Sample], chaos_level: usize) {
-                for _ in 0..chaos_level {
-                    let (lower, upper) = {
-                        let mut lower;
-                        let mut upper;
-                        loop {
-                            let a = rand::random::<usize>() % target.len();
-                            let b = rand::random::<usize>() % target.len();
-                            lower = a.min(b);
-                            upper = a.max(b);
-                            if upper - lower < target.len() / 64 || target.len() / 64 == 0 {
-                                break;
-                            }
-                        }
-                        (lower, upper)
-                    };
-                    target[lower..=upper].fill(0.0);
-                }
-            }
             let orig_samples = orig_samples
                 .iter()
                 .map(|x| (*x as Sample) / i16::MAX as Sample)
                 .collect();
-            let (mut hi_passes, mut lowest_pass, low_passes) =
+            let (hi_passes, lowest_pass, low_passes) =
                 wavelet_transform(&orig_samples, args.levels, args.wavelet);
-            hi_passes.iter_mut().for_each(|x| chaos_zero(x, 64));
-            chaos_zero(&mut lowest_pass, 64);
+
             let samples = wavelet_untransform(&hi_passes, &lowest_pass, args.wavelet);
 
             if args.debug {
