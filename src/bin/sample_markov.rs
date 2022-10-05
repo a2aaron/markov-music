@@ -1,7 +1,8 @@
 use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
-use markov_music::samples::markov_samples;
+use markov::Chain;
+use markov_music::quantize::Quantizable;
 
 mod util;
 
@@ -29,7 +30,7 @@ struct Args {
     /// Length, in seconds, of audio to generate.
     #[arg(short, long, default_value_t = 60)]
     length: usize,
-    /// Which channel of the mp3 to use.
+    /// Which channel of the mp3 to use, (ignored if there is only one channel)
     #[arg(short, long, value_enum, default_value_t = Channel::Both)]
     channel: Channel,
 }
@@ -73,12 +74,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 args.order * args.depth as usize
             );
 
-            let max_range = 2usize.pow(args.depth);
-            let samples =
-                markov_samples(&channel, args.order, max_range, args.length * sample_rate);
+            let quantization_level = 2usize.pow(args.depth);
+            let samples = quantize_and_generate(
+                channel,
+                args.order,
+                args.length * sample_rate,
+                quantization_level,
+            );
             samples
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<Vec<_>>>();
 
     util::write_wav(
         &args.out_path,
@@ -87,4 +92,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         samples.get(1).map(Vec::as_ref),
     )?;
     Ok(())
+}
+
+fn quantize_and_generate(
+    samples: &[i16],
+    order: usize,
+    length: usize,
+    quantization_level: usize,
+) -> Vec<i16> {
+    println!("Quantizing samples... (level = {})", quantization_level);
+    let samples = samples
+        .iter()
+        .map(|x| Quantizable::quantize(*x, i16::MIN, i16::MAX, quantization_level))
+        .collect::<Vec<_>>();
+
+    println!(
+        "Training Markov chain of order {}... ({} samples)",
+        order,
+        samples.len()
+    );
+    let mut chain = Chain::of_order(order);
+    chain.feed(samples);
+
+    println!("Generating Markov chain... ({} samples)", length);
+    chain
+        .iter()
+        .flatten()
+        .map(|x| Quantizable::unquantize(x, i16::MIN, i16::MAX, quantization_level))
+        .take(length)
+        .collect()
 }

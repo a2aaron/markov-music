@@ -6,5 +6,4 @@ pub mod chaos;
 pub mod midi;
 pub mod notes;
 pub mod quantize;
-pub mod samples;
 pub mod wavelet;
