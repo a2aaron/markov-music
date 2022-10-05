@@ -51,3 +51,13 @@ impl Quantizable for i16 {
         x.into()
     }
 }
+
+impl Quantizable for f64 {
+    fn from_f64(x: f64) -> Self {
+        x
+    }
+
+    fn into_f64(x: Self) -> f64 {
+        x
+    }
+}

@@ -2,6 +2,7 @@ use std::{error::Error, io::Read};
 
 use clap::{command, Parser, ValueEnum};
 use markov_music::{
+    quantize::Quantizable,
     samples::markov_samples,
     wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType},
 };
@@ -129,12 +130,45 @@ fn main() -> Result<(), Box<dyn Error>> {
             samples
         }
         Mode::Wavelet => {
+            fn quantize(
+                signal: &[Sample],
+                quantization_level: usize,
+            ) -> (Vec<usize>, Sample, Sample) {
+                let min = signal.iter().cloned().reduce(f64::min).unwrap();
+                let max = signal.iter().cloned().reduce(f64::max).unwrap();
+                let quantized = signal
+                    .iter()
+                    .map(|x| Quantizable::quantize(*x, min, max, quantization_level))
+                    .collect();
+                (quantized, min, max)
+            }
+
+            fn unquantize(
+                (signal, min, max): &(Vec<usize>, Sample, Sample),
+                quantization_level: usize,
+            ) -> Vec<Sample> {
+                signal
+                    .iter()
+                    .map(|x| Quantizable::unquantize(*x, *min, *max, quantization_level))
+                    .collect()
+            }
             let orig_samples = orig_samples
                 .iter()
                 .map(|x| (*x as Sample) / i16::MAX as Sample)
                 .collect();
             let (hi_passes, lowest_pass, low_passes) =
                 wavelet_transform(&orig_samples, args.levels, args.wavelet);
+
+            let quantization_level = 2usize.pow(args.depth);
+            let hi_passes = hi_passes
+                .iter()
+                .map(|hi_pass| quantize(&hi_pass, quantization_level));
+            let lowest_pass = quantize(&lowest_pass, quantization_level);
+
+            let hi_passes = hi_passes
+                .map(|hi_pass| unquantize(&hi_pass, quantization_level))
+                .collect::<Vec<_>>();
+            let lowest_pass = unquantize(&lowest_pass, quantization_level);
 
             let samples = wavelet_untransform(&hi_passes, &lowest_pass, args.wavelet);
 
