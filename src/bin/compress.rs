@@ -56,9 +56,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (mut left, mut right, sample_rate) = util::read_mp3_file(&args.in_path)?;
 
     compress(args.wavelet, &args.quantization, &mut left);
-    compress(args.wavelet, &args.quantization, &mut right);
+    if let Some(right) = right.as_mut() {
+        compress(args.wavelet, &args.quantization, right);
+    }
 
-    util::write_wav(&args.out_path, sample_rate, &left, Some(&right))?;
+    util::write_wav(&args.out_path, sample_rate, &left, right.as_deref())?;
 
     Ok(())
 }
@@ -69,7 +71,8 @@ fn compress(wavelet: WaveletType, quantization: &[usize], samples: &mut [i16]) {
         .iter()
         .map(|&x| x as Sample / i16::MAX as Sample)
         .collect();
-    let (mut detail, mut approx, _) = wavelet::wavelet_transform(&float_samples, num_levels, wavelet);
+    let (mut detail, mut approx, _) =
+        wavelet::wavelet_transform(&float_samples, num_levels, wavelet);
     quantize(quantization[0], &mut approx);
     for (&quant, detail) in quantization[1..].iter().zip(detail.iter_mut().rev()) {
         quantize(quant, detail);
@@ -95,9 +98,9 @@ fn quantize(levels: usize, data: &mut [Sample]) {
         return;
     }
 
-    let (min, max) = data.iter().fold((data[0], data[0]), |(min, max), x| {
-        (x.min(min), x.max(max))
-    });
+    let (min, max) = data
+        .iter()
+        .fold((data[0], data[0]), |(min, max), x| (x.min(min), x.max(max)));
     for sample in data {
         *sample = quantize_one(levels, min, max, *sample);
     }

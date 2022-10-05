@@ -1,11 +1,7 @@
 use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
-use markov_music::{
-    quantize::Quantizable,
-    samples::markov_samples,
-    wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType},
-};
+use markov_music::samples::markov_samples;
 
 mod util;
 
@@ -23,7 +19,7 @@ struct Args {
     /// Recommended values are betwee 3 and 8, depending on the length and type of input file.
     #[arg(short = 'O', long, default_value_t = 3)]
     order: usize,
-    /// Bit depth. Only compatible with sample mode. This is sets the range of allowed values that
+    /// Bit depth. This is sets the range of allowed values that
     /// the samples may take on. Higher values result in nicer sounding output, but are more likely
     /// to be deterministic. Often, setting the order to a lower value cancels out setting the depth
     /// to a higher value. Note that this does not actually affect the bit-depth of the output WAV
@@ -34,21 +30,8 @@ struct Args {
     #[arg(short, long, default_value_t = 60)]
     length: usize,
     /// Which channel of the mp3 to use.
-    #[arg(short, long, value_enum, default_value_t = Channel::Left)]
+    #[arg(short, long, value_enum, default_value_t = Channel::Both)]
     channel: Channel,
-    /// Number of levels to use in the wavelet transform.
-    #[arg(short, long, default_value_t = 6)]
-    levels: usize,
-    /// Wavelet type to use
-    #[arg(short, long, value_enum, default_value_t = WaveletType::Haar)]
-    wavelet: WaveletType,
-    /// What generation mode to use. "sample" means the markov chain directly generates audio samples,
-    /// while "wavelet" means the markov chain will generate wavelet coefficents.
-    #[arg(short, long, value_enum, default_value_t = Mode::Sample)]
-    mode: Mode,
-    /// Enable debug mode.
-    #[arg(long)]
-    debug: bool,
 }
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
@@ -61,6 +44,7 @@ enum Mode {
 enum Channel {
     Left,
     Right,
+    Both,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -68,13 +52,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (left, right, sample_rate) = util::read_mp3_file(&args.in_path)?;
 
-    let orig_samples = match args.channel {
-        Channel::Left => left,
-        Channel::Right => right,
+    let channels = if let Some(right) = right {
+        match args.channel {
+            Channel::Left => vec![left],
+            Channel::Right => vec![right],
+            Channel::Both => vec![left, right],
+        }
+    } else {
+        println!("Ignoring --channel flag because there is only one channel");
+        vec![left]
     };
 
-    let samples = match args.mode {
-        Mode::Sample => {
+    let samples = channels
+        .iter()
+        .map(|channel| {
             println!(
                 "Generating markov chain with order = {}, depth = {} (total states = 2^{})",
                 args.order,
@@ -83,98 +74,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
 
             let max_range = 2usize.pow(args.depth);
-            let samples = markov_samples(
-                &orig_samples,
-                args.order,
-                max_range,
-                args.length * sample_rate,
-            );
+            let samples =
+                markov_samples(&channel, args.order, max_range, args.length * sample_rate);
             samples
-        }
-        Mode::Wavelet => {
-            fn quantize(
-                signal: &[Sample],
-                quantization_level: usize,
-            ) -> (Vec<usize>, Sample, Sample) {
-                let min = signal.iter().cloned().reduce(f64::min).unwrap();
-                let max = signal.iter().cloned().reduce(f64::max).unwrap();
-                let quantized = signal
-                    .iter()
-                    .map(|x| Quantizable::quantize(*x, min, max, quantization_level))
-                    .collect();
-                (quantized, min, max)
-            }
+        })
+        .collect::<Vec<_>>();
 
-            fn unquantize(
-                (signal, min, max): &(Vec<usize>, Sample, Sample),
-                quantization_level: usize,
-            ) -> Vec<Sample> {
-                signal
-                    .iter()
-                    .map(|x| Quantizable::unquantize(*x, *min, *max, quantization_level))
-                    .collect()
-            }
-            let orig_samples = orig_samples
-                .iter()
-                .map(|x| (*x as Sample) / i16::MAX as Sample)
-                .collect();
-            let (hi_passes, lowest_pass, low_passes) =
-                wavelet_transform(&orig_samples, args.levels, args.wavelet);
-
-            let quantization_level = 2usize.pow(args.depth);
-            let hi_passes = hi_passes
-                .iter()
-                .map(|hi_pass| quantize(&hi_pass, quantization_level));
-            let lowest_pass = quantize(&lowest_pass, quantization_level);
-
-            let hi_passes = hi_passes
-                .map(|hi_pass| unquantize(&hi_pass, quantization_level))
-                .collect::<Vec<_>>();
-            let lowest_pass = unquantize(&lowest_pass, quantization_level);
-
-            let samples = wavelet_untransform(&hi_passes, &lowest_pass, args.wavelet);
-
-            if args.debug {
-                println!("Layers: {}, Wavelet: {:?}", args.levels, args.wavelet);
-
-                println!(
-                    "Max error: {}",
-                    orig_samples
-                        .iter()
-                        .zip(samples.iter())
-                        .map(|(a, b)| (a - b).abs())
-                        .reduce(Sample::max)
-                        .unwrap(),
-                );
-
-                let error_sum = orig_samples
-                    .iter()
-                    .zip(samples.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .sum::<Sample>();
-                println!("Sum of absolute error: {}", error_sum);
-                println!(
-                    "Average error per sample: {}\n",
-                    error_sum / orig_samples.len() as Sample
-                );
-
-                samples
-                    .iter()
-                    .chain(low_passes.iter().flatten())
-                    .chain(hi_passes.iter().flatten())
-                    .cloned()
-                    .map(|x| (x * i16::MAX as Sample / 4.0) as i16)
-                    .collect()
-            } else {
-                samples
-                    .iter()
-                    .map(|x| (x * i16::MAX as Sample / 4.0) as i16)
-                    .collect()
-            }
-        }
-    };
-
-    util::write_wav(&args.out_path, sample_rate, &samples, None)?;
-
+    util::write_wav(
+        &args.out_path,
+        sample_rate,
+        &samples[0],
+        samples.get(1).map(Vec::as_ref),
+    )?;
     Ok(())
 }
