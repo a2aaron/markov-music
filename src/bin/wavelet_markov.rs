@@ -53,7 +53,7 @@ enum Channel {
     Both,
 }
 
-fn quantize(signal: &[Sample], quantization_level: usize) -> (Vec<usize>, Sample, Sample) {
+fn quantize(signal: &[Sample], quantization_level: u32) -> (Vec<u32>, Sample, Sample) {
     let min = signal.iter().cloned().reduce(f64::min).unwrap();
     let max = signal.iter().cloned().reduce(f64::max).unwrap();
     let quantized = signal
@@ -64,8 +64,8 @@ fn quantize(signal: &[Sample], quantization_level: usize) -> (Vec<usize>, Sample
 }
 
 fn unquantize(
-    (signal, min, max): &(Vec<usize>, Sample, Sample),
-    quantization_level: usize,
+    (signal, min, max): &(Vec<u32>, Sample, Sample),
+    quantization_level: u32,
 ) -> Vec<Sample> {
     signal
         .iter()
@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let (hi_passes, lowest_pass, low_passes) =
                 wavelet_transform(&orig_samples, args.levels, args.wavelet);
 
-            let quantization_level = 2usize.pow(args.depth);
+            let quantization_level = 2u32.pow(args.depth);
             let hi_passes = hi_passes
                 .iter()
                 .map(|hi_pass| quantize(&hi_pass, quantization_level));

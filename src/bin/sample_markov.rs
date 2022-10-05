@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
-use markov::Chain;
+use markov::{Chain, Chainable};
 use markov_music::quantize::Quantizable;
 
 mod util;
@@ -20,11 +20,12 @@ struct Args {
     /// Recommended values are betwee 3 and 8, depending on the length and type of input file.
     #[arg(short = 'O', long, default_value_t = 3)]
     order: usize,
-    /// Bit depth. This is sets the range of allowed values that
-    /// the samples may take on. Higher values result in nicer sounding output, but are more likely
-    /// to be deterministic. Often, setting the order to a lower value cancels out setting the depth
-    /// to a higher value. Note that this does not actually affect the bit-depth of the output WAV
-    /// file, which is always 16 bits. Recommended values are between 8 and 16.
+    /// Bit depth. This is sets the range of allowed values that the samples may take on. Higher
+    /// values result in nicer sounding output, but are more likely to be deterministic. Often,
+    /// setting the order to a lower value cancels out setting the depth to a higher value. Note
+    /// that this does not actually affect the bit-depth of the output WAV file, which is always 16
+    /// bits. Recommended values are between 8 and 16. If this value is set to zero, no quantization
+    /// is done.
     #[arg(short, long, default_value_t = 14)]
     depth: u32,
     /// Length, in seconds, of audio to generate.
@@ -33,6 +34,9 @@ struct Args {
     /// Which channel of the mp3 to use, (ignored if there is only one channel)
     #[arg(short, long, value_enum, default_value_t = Channel::Both)]
     channel: Channel,
+    /// Skip markov generation--only quantize the signal.
+    #[arg(short, long, default_value_t = false)]
+    skip_markov: bool,
 }
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
@@ -64,7 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         vec![left]
     };
 
-    let samples = channels
+    let samples: Vec<Vec<i16>> = channels
         .iter()
         .map(|channel| {
             println!(
@@ -74,16 +78,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                 args.order * args.depth as usize
             );
 
-            let quantization_level = 2usize.pow(args.depth);
-            let samples = quantize_and_generate(
-                channel,
-                args.order,
-                args.length * sample_rate,
-                quantization_level,
-            );
-            samples
+            let length = args.length * sample_rate;
+            match (args.depth, args.skip_markov) {
+                (0, true) => channel.clone(),
+                (0, false) => generate(channel, args.order, length),
+                (depth, true) => {
+                    let quantization_level = 2u32.pow(depth);
+                    let quantized = quantize(channel, quantization_level);
+                    unquantize(&quantized, quantization_level)
+                }
+                (depth, false) => {
+                    let quantization_level = 2u32.pow(depth);
+                    let quantized = quantize(channel, quantization_level);
+                    let samples = generate(&quantized, args.order, length);
+                    unquantize(&samples, quantization_level)
+                }
+            }
         })
-        .collect::<Vec<Vec<_>>>();
+        .collect();
 
     util::write_wav(
         &args.out_path,
@@ -94,18 +106,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn quantize_and_generate(
-    samples: &[i16],
-    order: usize,
-    length: usize,
-    quantization_level: usize,
-) -> Vec<i16> {
+fn quantize(samples: &[i16], quantization_level: u32) -> Vec<u32> {
     println!("Quantizing samples... (level = {})", quantization_level);
-    let samples = samples
+    samples
         .iter()
         .map(|x| Quantizable::quantize(*x, i16::MIN, i16::MAX, quantization_level))
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
+fn unquantize(samples: &[u32], quantization_level: u32) -> Vec<i16> {
+    samples
+        .iter()
+        .map(|x| Quantizable::unquantize(*x, i16::MIN, i16::MAX, quantization_level))
+        .collect()
+}
+
+fn generate<C: Chainable>(samples: &[C], order: usize, length: usize) -> Vec<C> {
     println!(
         "Training Markov chain of order {}... ({} samples)",
         order,
@@ -115,10 +131,5 @@ fn quantize_and_generate(
     chain.feed(samples);
 
     println!("Generating Markov chain... ({} samples)", length);
-    chain
-        .iter()
-        .flatten()
-        .map(|x| Quantizable::unquantize(x, i16::MIN, i16::MAX, quantization_level))
-        .take(length)
-        .collect()
+    chain.iter().flatten().take(length).collect()
 }
