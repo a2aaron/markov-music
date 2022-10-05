@@ -2,7 +2,6 @@ use std::{error::Error, io::Read};
 
 use clap::{command, Parser, ValueEnum};
 use markov_music::{
-    chaos::{chaos_copy, chaos_zero},
     samples::markov_samples,
     wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType},
 };
