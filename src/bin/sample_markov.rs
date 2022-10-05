@@ -1,13 +1,12 @@
-use std::{error::Error, io::Read};
+use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
 use markov_music::{
-    chaos::{chaos_copy, chaos_zero},
     samples::markov_samples,
     wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType},
 };
-use minimp3::Decoder;
-use wav::WAV_FORMAT_PCM;
+
+mod util;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -63,48 +62,10 @@ enum Channel {
     Right,
 }
 
-fn get_mp3_data<R: Read>(
-    mut decoder: Decoder<R>,
-) -> Result<(Vec<i16>, Vec<i16>, usize), Box<dyn Error>> {
-    let mut frames = vec![];
-    loop {
-        match decoder.next_frame() {
-            Ok(frame) => frames.push(frame),
-            Err(err) => match err {
-                minimp3::Error::Io(err) => return Err(err.into()),
-                minimp3::Error::InsufficientData => continue,
-                minimp3::Error::SkippedData => continue,
-                minimp3::Error::Eof => break,
-            },
-        }
-    }
-    let samples = frames
-        .iter()
-        .flat_map(|frame| frame.data.clone())
-        .collect::<Vec<i16>>();
-    let (left, right) = split_channels(&samples);
-
-    let sample_rate = frames[0].sample_rate as usize;
-
-    Ok((left, right, sample_rate))
-}
-
-fn split_channels<T: Copy>(samples: &[T]) -> (Vec<T>, Vec<T>) {
-    let mut left = Vec::with_capacity(samples.len() / 2);
-    let mut right = Vec::with_capacity(samples.len() / 2);
-    for chunk in samples.chunks_exact(2) {
-        left.push(chunk[0]);
-        right.push(chunk[1]);
-    }
-    (left, right)
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    let file = std::fs::File::open(args.in_path)?;
-    let decoder = Decoder::new(file);
-    let (left, right, sample_rate) = get_mp3_data(decoder)?;
+    let (left, right, sample_rate) = util::read_mp3_file(&args.in_path)?;
 
     let orig_samples = match args.channel {
         Channel::Left => left,
@@ -179,10 +140,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let wav_header = wav::header::Header::new(WAV_FORMAT_PCM, 1, sample_rate as u32, 16);
-    let track = wav::BitDepth::Sixteen(samples);
-    let mut out_file = std::fs::File::create(args.out_path)?;
-    wav::write(wav_header, &track, &mut out_file)?;
+    util::write_wav(&args.out_path, sample_rate, &samples, None)?;
 
     Ok(())
 }
