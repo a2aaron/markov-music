@@ -136,26 +136,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             if args.debug {
                 println!("Layers: {}, Wavelet: {:?}", args.levels, args.wavelet);
 
-                println!(
-                    "Max error: {}",
-                    orig_samples
-                        .iter()
-                        .zip(samples.iter())
-                        .map(|(a, b)| (a - b).abs())
-                        .reduce(Sample::max)
-                        .unwrap(),
-                );
-
-                let error_sum = orig_samples
+                let error = orig_samples
                     .iter()
                     .zip(samples.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .sum::<Sample>();
-                println!("Sum of absolute error: {}", error_sum);
-                println!(
-                    "Average error per sample: {}\n",
-                    error_sum / orig_samples.len() as Sample
-                );
+                    .map(|(a, b)| (a - b).abs());
+
+                let (max_error, sum_error, len) = error
+                    .fold((0.0f64, 0.0f64, 0.0f64), |(max, sum, i), err| {
+                        (max.max(err), sum + err, i + 1.0)
+                    });
+                let mse = sum_error / len;
+                println!("max error: {}\nMSE: {}", max_error, mse);
 
                 samples
                     .iter()
