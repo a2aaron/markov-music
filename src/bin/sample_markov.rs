@@ -2,7 +2,7 @@ use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
 use markov::{Chain, Chainable};
-use markov_music::quantize::Quantizable;
+use markov_music::quantize::{Quantizable, QuantizedSample};
 
 mod util;
 
@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn quantize(samples: &[i16], quantization_level: u32) -> Vec<u32> {
+fn quantize(samples: &[i16], quantization_level: u32) -> Vec<QuantizedSample> {
     println!("Quantizing samples... (level = {})", quantization_level);
     samples
         .iter()
@@ -114,7 +114,7 @@ fn quantize(samples: &[i16], quantization_level: u32) -> Vec<u32> {
         .collect::<Vec<_>>()
 }
 
-fn unquantize(samples: &[u32], quantization_level: u32) -> Vec<i16> {
+fn unquantize(samples: &[QuantizedSample], quantization_level: u32) -> Vec<i16> {
     samples
         .iter()
         .map(|x| Quantizable::unquantize(*x, i16::MIN, i16::MAX, quantization_level))

@@ -1,7 +1,10 @@
 use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
-use markov_music::wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType};
+use markov_music::{
+    quantize::{Quantizable, QuantizedSample},
+    wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType},
+};
 
 mod util;
 
@@ -46,16 +49,13 @@ enum Channel {
     Both,
 }
 
-type QuantizedSample = f64;
-
 fn quantize(signal: &[Sample], quantization_level: u32) -> (Vec<QuantizedSample>, Sample, Sample) {
     let min = signal.iter().cloned().reduce(f64::min).unwrap();
     let max = signal.iter().cloned().reduce(f64::max).unwrap();
-    let scale = (max - min) / (quantization_level as Sample);
 
     let quantized = signal
         .iter()
-        .map(|sample| (sample / scale).round() as QuantizedSample)
+        .map(|sample| Quantizable::quantize(*sample, min, max, quantization_level))
         .collect();
     (quantized, min, max)
 }
@@ -64,10 +64,9 @@ fn unquantize(
     (signal, min, max): &(Vec<QuantizedSample>, Sample, Sample),
     quantization_level: u32,
 ) -> Vec<Sample> {
-    let scale = (max - min) / (quantization_level as Sample);
     signal
         .iter()
-        .map(|quantized| (*quantized as Sample) * scale)
+        .map(|quantized| Quantizable::unquantize(*quantized, *min, *max, quantization_level))
         .collect()
 }
 
