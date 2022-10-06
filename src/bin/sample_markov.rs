@@ -17,8 +17,9 @@ struct Args {
     #[arg(short, long = "out", default_value = "out.wav")]
     out_path: String,
     /// Markov chain order. Higher values means the output is less chaotic, but more deterministic.
-    /// Recommended values are betwee 3 and 8, depending on the length and type of input file.
-    #[arg(short = 'O', long, default_value_t = 3)]
+    /// Recommended values are betwee 3 and 8, depending on the length and type of input file. If this
+    /// value is zero, Markov generation is skipped.
+    #[arg(long, default_value_t = 3)]
     order: usize,
     /// Bit depth. This is sets the range of allowed values that the samples may take on. Higher
     /// values result in nicer sounding output, but are more likely to be deterministic. Often,
@@ -26,17 +27,14 @@ struct Args {
     /// that this does not actually affect the bit-depth of the output WAV file, which is always 16
     /// bits. Recommended values are between 8 and 16. If this value is set to zero, no quantization
     /// is done.
-    #[arg(short, long, default_value_t = 14)]
+    #[arg(long, default_value_t = 14)]
     depth: u32,
     /// Length, in seconds, of audio to generate.
-    #[arg(short, long, default_value_t = 60)]
+    #[arg(long, default_value_t = 60)]
     length: usize,
     /// Which channel of the mp3 to use, (ignored if there is only one channel)
-    #[arg(short, long, value_enum, default_value_t = Channel::Both)]
+    #[arg(long, value_enum, default_value_t = Channel::Both)]
     channel: Channel,
-    /// Skip markov generation--only quantize the signal.
-    #[arg(short, long, default_value_t = false)]
-    skip_markov: bool,
 }
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
@@ -79,18 +77,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
 
             let length = args.length * sample_rate;
-            match (args.depth, args.skip_markov) {
-                (0, true) => channel.clone(),
-                (0, false) => generate(channel, args.order, length),
-                (depth, true) => {
+            match (args.depth, args.order) {
+                (0, 0) => channel.clone(),
+                (0, order) => generate(channel, order, length),
+                (depth, 0) => {
                     let quantization_level = 2u32.pow(depth);
                     let quantized = quantize(channel, quantization_level);
                     unquantize(&quantized, quantization_level)
                 }
-                (depth, false) => {
+                (depth, order) => {
                     let quantization_level = 2u32.pow(depth);
                     let quantized = quantize(channel, quantization_level);
-                    let samples = generate(&quantized, args.order, length);
+                    let samples = generate(&quantized, order, length);
                     unquantize(&samples, quantization_level)
                 }
             }
