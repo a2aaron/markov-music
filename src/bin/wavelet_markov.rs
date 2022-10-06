@@ -1,10 +1,7 @@
 use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
-use markov_music::{
-    quantize::Quantizable,
-    wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType},
-};
+use markov_music::wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType};
 
 mod util;
 
@@ -20,26 +17,22 @@ struct Args {
     out_path: String,
     /// Markov chain order. Higher values means the output is less chaotic, but more deterministic.
     /// Recommended values are betwee 3 and 8, depending on the length and type of input file.
-    #[arg(short = 'O', long, default_value_t = 3)]
+    #[arg(long, default_value_t = 3)]
     order: usize,
-    /// Bit depth. Only compatible with sample mode. This is sets the range of allowed values that
-    /// the samples may take on. Higher values result in nicer sounding output, but are more likely
-    /// to be deterministic. Often, setting the order to a lower value cancels out setting the depth
-    /// to a higher value. Note that this does not actually affect the bit-depth of the output WAV
-    /// file, which is always 16 bits. Recommended values are between 8 and 16.
-    #[arg(short, long, default_value_t = 14)]
-    depth: u32,
+    /// The number of levels to quantize to.
+    #[arg(long, default_value_t = 256)]
+    quantization: u32,
     /// Length, in seconds, of audio to generate.
-    #[arg(short, long, default_value_t = 60)]
+    #[arg(long, default_value_t = 60)]
     length: usize,
     /// Which channel of the mp3 to use.
-    #[arg(short, long, value_enum, default_value_t = Channel::Left)]
+    #[arg(value_enum, default_value_t = Channel::Left)]
     channel: Channel,
     /// Number of levels to use in the wavelet transform.
-    #[arg(short, long, default_value_t = 6)]
+    #[arg(long, default_value_t = 6)]
     levels: usize,
     /// Wavelet type to use
-    #[arg(short, long, value_enum, default_value_t = WaveletType::Haar)]
+    #[arg(long, value_enum, default_value_t = WaveletType::Haar)]
     wavelet: WaveletType,
     /// Enable debug mode.
     #[arg(long)]
@@ -53,24 +46,58 @@ enum Channel {
     Both,
 }
 
-fn quantize(signal: &[Sample], quantization_level: u32) -> (Vec<u32>, Sample, Sample) {
+type QuantizedSample = f64;
+
+fn quantize(signal: &[Sample], quantization_level: u32) -> (Vec<QuantizedSample>, Sample, Sample) {
     let min = signal.iter().cloned().reduce(f64::min).unwrap();
     let max = signal.iter().cloned().reduce(f64::max).unwrap();
+    let scale = (max - min) / (quantization_level as Sample);
+
     let quantized = signal
         .iter()
-        .map(|x| Quantizable::quantize(*x, min, max, quantization_level))
+        .map(|sample| (sample / scale).round() as QuantizedSample)
         .collect();
     (quantized, min, max)
 }
 
 fn unquantize(
-    (signal, min, max): &(Vec<u32>, Sample, Sample),
+    (signal, min, max): &(Vec<QuantizedSample>, Sample, Sample),
     quantization_level: u32,
 ) -> Vec<Sample> {
+    let scale = (max - min) / (quantization_level as Sample);
     signal
         .iter()
-        .map(|x| Quantizable::unquantize(*x, *min, *max, quantization_level))
+        .map(|quantized| (*quantized as Sample) * scale)
         .collect()
+}
+
+fn unquantize_passes(
+    hi_passes: &[(Vec<QuantizedSample>, f64, f64)],
+    lowest_pass: &(Vec<QuantizedSample>, f64, f64),
+    quantization_level: u32,
+) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let hi_passes = hi_passes
+        .iter()
+        .map(|hi_pass| unquantize(&hi_pass, quantization_level))
+        .collect::<Vec<_>>();
+    let lowest_pass = unquantize(&lowest_pass, quantization_level);
+    (hi_passes, lowest_pass)
+}
+
+fn quantize_passes(
+    hi_passes: &[Vec<f64>],
+    lowest_pass: &[f64],
+    quantization_level: u32,
+) -> (
+    Vec<(Vec<QuantizedSample>, f64, f64)>,
+    (Vec<QuantizedSample>, f64, f64),
+) {
+    let hi_passes = hi_passes
+        .iter()
+        .map(|hi_pass| quantize(&hi_pass, quantization_level))
+        .collect();
+    let lowest_pass = quantize(&lowest_pass, quantization_level);
+    (hi_passes, lowest_pass)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -99,16 +126,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             let (hi_passes, lowest_pass, low_passes) =
                 wavelet_transform(&orig_samples, args.levels, args.wavelet);
 
-            let quantization_level = 2u32.pow(args.depth);
-            let hi_passes = hi_passes
-                .iter()
-                .map(|hi_pass| quantize(&hi_pass, quantization_level));
-            let lowest_pass = quantize(&lowest_pass, quantization_level);
+            let (hi_passes, lowest_pass) =
+                quantize_passes(&hi_passes, &lowest_pass, args.quantization);
 
-            let hi_passes = hi_passes
-                .map(|hi_pass| unquantize(&hi_pass, quantization_level))
-                .collect::<Vec<_>>();
-            let lowest_pass = unquantize(&lowest_pass, quantization_level);
+            let (hi_passes, lowest_pass) =
+                unquantize_passes(&hi_passes, &lowest_pass, args.quantization);
 
             let samples = wavelet_untransform(&hi_passes, &lowest_pass, args.wavelet);
 
@@ -141,12 +163,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .chain(low_passes.iter().flatten())
                     .chain(hi_passes.iter().flatten())
                     .cloned()
-                    .map(|x| (x * i16::MAX as Sample / 4.0) as i16)
+                    .map(|x| (x * i16::MAX as Sample) as i16)
                     .collect()
             } else {
                 samples
                     .iter()
-                    .map(|x| (x * i16::MAX as Sample / 4.0) as i16)
+                    .map(|x| (x * i16::MAX as Sample) as i16)
                     .collect::<Vec<_>>()
             }
         })
@@ -156,7 +178,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &args.out_path,
         sample_rate,
         &samples[0],
-        samples.get(0).map(Vec::as_ref),
+        samples.get(1).map(Vec::as_ref),
     )?;
 
     Ok(())
