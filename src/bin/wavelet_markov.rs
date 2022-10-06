@@ -71,32 +71,32 @@ fn unquantize(
 }
 
 fn unquantize_bands(
-    hi_bands: &[(Vec<QuantizedSample>, f64, f64)],
-    lowest_pass: &(Vec<QuantizedSample>, f64, f64),
+    detail_bands: &[(Vec<QuantizedSample>, f64, f64)],
+    approx_band: &(Vec<QuantizedSample>, f64, f64),
     quantization_level: u32,
 ) -> (Vec<Vec<f64>>, Vec<f64>) {
-    let hi_bands = hi_bands
+    let detail_bands = detail_bands
         .iter()
         .map(|hi_pass| unquantize(&hi_pass, quantization_level))
         .collect::<Vec<_>>();
-    let lowest_pass = unquantize(&lowest_pass, quantization_level);
-    (hi_bands, lowest_pass)
+    let approx_band = unquantize(&approx_band, quantization_level);
+    (detail_bands, approx_band)
 }
 
 fn quantize_bands(
-    hi_bands: &[Vec<f64>],
-    lowest_pass: &[f64],
+    detail_bands: &[Vec<f64>],
+    approx_band: &[f64],
     quantization_level: u32,
 ) -> (
     Vec<(Vec<QuantizedSample>, f64, f64)>,
     (Vec<QuantizedSample>, f64, f64),
 ) {
-    let hi_bands = hi_bands
+    let detail_bands = detail_bands
         .iter()
         .map(|hi_pass| quantize(&hi_pass, quantization_level))
         .collect();
-    let lowest_pass = quantize(&lowest_pass, quantization_level);
-    (hi_bands, lowest_pass)
+    let approx_band = quantize(&approx_band, quantization_level);
+    (detail_bands, approx_band)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -115,23 +115,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         vec![left]
     };
 
-    let samples = channels
+    let samples: Vec<Vec<i16>> = channels
         .iter()
         .map(|channel| {
             let orig_samples = channel
                 .iter()
                 .map(|x| (*x as Sample) / i16::MAX as Sample)
                 .collect();
-            let (hi_bands, lowest_pass, low_bands) =
+            let (detail_bands, approx_band, _) =
                 wavelet_transform(&orig_samples, args.levels, args.wavelet);
 
-            let (hi_bands, lowest_pass) =
-                quantize_bands(&hi_bands, &lowest_pass, args.quantization);
+            let (detail_bands, approx_band) =
+                quantize_bands(&detail_bands, &approx_band, args.quantization);
 
-            let (hi_bands, lowest_pass) =
-                unquantize_bands(&hi_bands, &lowest_pass, args.quantization);
+            let (detail_bands, approx_band) =
+                unquantize_bands(&detail_bands, &approx_band, args.quantization);
 
-            let samples = wavelet_untransform(&hi_bands, &lowest_pass, args.wavelet);
+            let samples = wavelet_untransform(&detail_bands, &approx_band, args.wavelet);
 
             if args.debug {
                 println!("Layers: {}, Wavelet: {:?}", args.levels, args.wavelet);
@@ -150,19 +150,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 samples
                     .iter()
-                    .chain(low_bands.iter().flatten())
-                    .chain(hi_bands.iter().flatten())
+                    .chain(approx_band.iter())
+                    .chain(detail_bands.iter().flatten())
                     .cloned()
-                    .map(|x| (x * i16::MAX as Sample) as i16)
+                    .map(|x| (x * i16::MAX as Sample * 0.5) as i16)
                     .collect()
             } else {
                 samples
                     .iter()
-                    .map(|x| (x * i16::MAX as Sample) as i16)
-                    .collect::<Vec<_>>()
+                    .map(|x| (x * i16::MAX as Sample * 0.5) as i16)
+                    .collect()
             }
         })
-        .collect::<Vec<_>>();
+        .collect();
 
     util::write_wav(
         &args.out_path,

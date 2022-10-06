@@ -207,45 +207,43 @@ pub fn wavelet_transform(
         );
     }
 
-    let mut hi_passes = vec![];
-    let mut low_passes = vec![];
+    let mut detail_bands = vec![];
+    let mut approx_band = vec![];
     let filter = wavelet.filter();
     for _ in 0..num_levels {
-        let low_pass = low_pass(&signal, &filter);
-        let high_pass = high_pass(&signal, &filter);
-        assert!(low_pass.len() == high_pass.len());
-        assert!(low_pass.len() * 2 == signal.len());
+        let approx = low_pass(&signal, &filter);
+        let detial = high_pass(&signal, &filter);
+        assert!(approx.len() == detial.len());
+        assert!(approx.len() * 2 == signal.len());
 
-        hi_passes.push(high_pass);
-        low_passes.push(low_pass.clone());
-        signal = low_pass;
+        detail_bands.push(detial);
+        approx_band.push(approx.clone());
+        signal = approx;
     }
-    (hi_passes, signal, low_passes)
+    (detail_bands, signal, approx_band)
 }
 
-fn upsample(low_signal: &Signal, high_signal: &Signal, wavelet: WaveletType) -> Signal {
-    assert!(low_signal.len() == high_signal.len());
-    let interleave = interleave_exact(low_signal, high_signal).cloned().collect();
+fn upsample(approx: &Signal, detail: &Signal, wavelet: WaveletType) -> Signal {
+    assert!(approx.len() == detail.len());
+    let interleave = interleave_exact(approx, detail).cloned().collect();
 
     let filter = wavelet.inverse_filter();
 
-    let low_signal = low_pass(&interleave, &filter);
-    let high_signal = high_pass(&interleave, &filter);
+    let approx = low_pass(&interleave, &filter);
+    let detail = high_pass(&interleave, &filter);
 
-    let interleave = interleave_exact(&low_signal, &high_signal)
-        .cloned()
-        .collect();
+    let interleave = interleave_exact(&approx, &detail).cloned().collect();
     interleave
 }
 
 pub fn wavelet_untransform(
-    hi_passes: &[Signal],
-    lowest_pass: &Signal,
+    detail_bands: &[Signal],
+    approx_band: &Signal,
     wavelet: WaveletType,
 ) -> Signal {
-    let mut out_signal = lowest_pass.clone();
-    for hi_pass in hi_passes.iter().rev() {
-        out_signal = upsample(&out_signal, hi_pass, wavelet);
+    let mut out_signal = approx_band.clone();
+    for detail in detail_bands.iter().rev() {
+        out_signal = upsample(&out_signal, detail, wavelet);
     }
     out_signal
 }
