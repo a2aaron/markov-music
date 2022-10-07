@@ -21,6 +21,19 @@ pub trait Quantizable: Sized {
         let min = Self::into_f64(min);
         let max = Self::into_f64(max);
         let x = Self::into_f64(x);
+        // Note that this transformation is deliberately done so that we remain around zero (in other
+        // words, the transformation is _linear_, not affine). This is important--if the transformation
+        // was affine (for example, we went from f64 to u32, instead of f64 to i32), then there is
+        // a good chance that 0u32 would map to something that is not 0.0f64. This would mean that
+        // 0.0f64 would be impossible to represent in the quantized signal, which is bad because
+        // most of the upper bands in the wavelet transform are actually zero (or very close to it)
+        // when they are mostly empty. Hence, we would be rounding lots of those bands to a nonzero
+        // value, which produces really bad artifacting.
+
+        // TODO: we could have a quantization scheme which is non-linear and zero-preserving. For
+        // example, we could come up with a dictionary that maps quantized values to non-quantized
+        // which always preserves zero (0 -> 0.0) and picks the other quantizations values to minimize
+        // some error function.
         let scale = (max - min) / (quantization_level as f64);
         (x / scale).round() as QuantizedSample
     }

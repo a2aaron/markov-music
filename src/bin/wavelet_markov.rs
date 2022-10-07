@@ -201,6 +201,7 @@ struct MarkovHeirachy {
 }
 
 impl MarkovHeirachy {
+    // Train a MarkovHeirachy on the given detail and approximation bands, with the given order.
     fn train(detail_bands: &[QuantizedBand], approx_band: &QuantizedBand, order: usize) -> Self {
         let mut approx_chain = Chain::of_order(order);
         approx_chain.feed(&approx_band.signal);
@@ -220,10 +221,17 @@ impl MarkovHeirachy {
         }
     }
 
+    /// Generate wavelet bands from the trained markov chains such that the reconstructed sample
+    /// will be approximately `length` samples long. If `length` is not a multiple of a power of two
+    /// of the number of levels, then `length` is adjusted to match (in this case, rounded down).
     fn generate(&self, length: usize) -> (Vec<Vec<QuantizedSample>>, Vec<QuantizedSample>) {
         let num_layers = self.detail_chains.len();
         let length = nearest_power_of_two(length, num_layers);
 
+        // Note that these divisions of length are actually one more than you would expect from zero
+        // indexing. This is because each layer is half of the prior signal. Hence, the first layer
+        // (layer 0) is actually half the length of the input audio. Therefore, we need to add one
+        // to the exponent when dividing by 2^n in order to account for this.
         let approx_signal = self
             .approx_chain
             .iter()
@@ -239,16 +247,10 @@ impl MarkovHeirachy {
                 chain
                     .iter()
                     .flatten()
-                    .take({
-                        let length = length / 2usize.pow((i + 1) as u32);
-                        println!("detail band {}: length {}", i, length);
-                        length
-                    })
+                    .take(length / 2usize.pow((i + 1) as u32))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-
-        println!("approx band: length: {}", approx_signal.len());
 
         (detail_signals, approx_signal)
     }
