@@ -20,10 +20,18 @@ struct Args {
     #[arg(short, long = "out", default_value = "out.wav")]
     out_path: String,
     /// Markov chain order. Higher values means the output is less chaotic, but more deterministic.
-    /// Recommended values are betwee 3 and 8, depending on the length and type of input file.
-    #[arg(long, default_value_t = 3)]
-    order: usize,
-    /// The number of levels to quantize to.
+    /// Recommended values are betwee 3 and 8, depending on the length and type of input file. This
+    /// is specified per band. The first value is the approximation band, then followed by the last
+    /// detail band to the first detail band. (Here, "last" detail band means the shortest detail
+    /// band, and hence the lowest-frequency detail band. Similarly, "first" detail band means the
+    /// longest detail band, and hence the highest-frequency band). Since each successive detail
+    /// band is twice as long as the previous, it is recommended that the bands follow a power-of-two
+    /// heirachy. If there are less values specified by this flag than there are bands, the last
+    /// value specified is applied to all the other bands, doubled for each successive detail band.
+    /// For example, "--levels 5 --order 3" is the same as "--levels 5 --order 3 3 6 12 24"
+    #[arg(short, long, required = true, num_args = 1..)]
+    order: Vec<usize>,
+    /// The number of levels to quantize to. This value is applied to every channel equally.
     #[arg(long, default_value_t = 256)]
     quantization: u32,
     /// Length, in seconds, of audio to generate.
@@ -128,6 +136,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         vec![left]
     };
 
+    let mut orders = args.order;
+
+    if orders.len() == 0 {
+        return Err("Not enough order values! Expected least 1 value, got zero".into());
+    } else if orders.len() > args.levels + 1 {
+        return Err(format!(
+            "Too many order values! Expected atm most {}, got {}",
+            orders.len(),
+            args.levels
+        )
+        .into());
+    } else if orders.len() < args.levels + 1 {
+        while orders.len() != args.levels + 1 {
+            let last_value = *orders.last().unwrap();
+            if orders.len() == 1 {
+                orders.push(last_value);
+            } else {
+                orders.push(last_value * 2);
+            }
+        }
+    }
+
     let samples: Vec<Vec<i16>> = channels
         .iter()
         .map(|channel| {
@@ -145,7 +175,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let (detail_bands, approx_band) = generate_markov(
                 &detail_bands,
                 &approx_band,
-                args.order,
+                &orders,
                 args.length * sample_rate,
             );
 
@@ -156,23 +186,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             if args.debug {
                 println!("Layers: {}, Wavelet: {:?}", args.levels, args.wavelet);
-
-                let error = orig_samples
-                    .iter()
-                    .zip(samples.iter())
-                    .map(|(a, b)| (a - b).abs());
-
-                let (max_error, sum_error, len) = error
-                    .fold((0.0f64, 0.0f64, 0.0f64), |(max, sum, i), err| {
-                        (max.max(err), sum + err, i + 1.0)
-                    });
-                let mse = sum_error / len;
-                println!("max error: {}\nMSE: {}", max_error, mse);
-
                 samples
                     .iter()
-                    .chain(approx_band.iter())
                     .chain(detail_bands.iter().flatten())
+                    .chain(approx_band.iter())
                     .cloned()
                     .map(|x| (x * i16::MAX as Sample * 0.5) as i16)
                     .collect()
@@ -201,19 +218,36 @@ struct MarkovHeirachy {
 }
 
 impl MarkovHeirachy {
-    // Train a MarkovHeirachy on the given detail and approximation bands, with the given order.
-    fn train(detail_bands: &[QuantizedBand], approx_band: &QuantizedBand, order: usize) -> Self {
-        let mut approx_chain = Chain::of_order(order);
-        approx_chain.feed(&approx_band.signal);
-
+    // Train a MarkovHeirachy on the given detail and approximation bands, with the given orders.
+    fn train(
+        detail_bands: &[QuantizedBand],
+        approx_band: &QuantizedBand,
+        orders: &[usize],
+    ) -> Self {
         let detail_chains = detail_bands
             .iter()
-            .map(|detail_band| {
+            .enumerate()
+            .map(|(i, detail_band)| {
+                let order = orders[orders.len() - 1 - i];
                 let mut detail_chain = Chain::of_order(order);
+                println!(
+                    "Training detail chain {} ({} samples, order {})",
+                    i,
+                    detail_band.signal.len(),
+                    order
+                );
                 detail_chain.feed(&detail_band.signal);
                 detail_chain
             })
             .collect();
+
+        println!(
+            "Training approx chain   ({} samples, order {})",
+            approx_band.signal.len(),
+            orders[0]
+        );
+        let mut approx_chain = Chain::of_order(orders[0]);
+        approx_chain.feed(&approx_band.signal);
 
         Self {
             approx_chain,
@@ -259,16 +293,16 @@ impl MarkovHeirachy {
 fn generate_markov(
     detail_bands: &[QuantizedBand],
     approx_band: &QuantizedBand,
-    order: usize,
+    orders: &[usize],
     length: usize,
 ) -> (Vec<QuantizedBand>, QuantizedBand) {
     let total_samples =
         detail_bands.iter().map(|x| x.signal.len()).sum::<usize>() + approx_band.signal.len();
     println!(
-        "Training Markov chain of order {} (total samples: {})",
-        order, total_samples
+        "Training Markov chain of orders {:?} (total samples: {})",
+        orders, total_samples
     );
-    let markov_heirachry = MarkovHeirachy::train(detail_bands, approx_band, order);
+    let markov_heirachry = MarkovHeirachy::train(detail_bands, approx_band, orders);
 
     println!(
         "Generating Markov chain samples... (total samples: {})",
