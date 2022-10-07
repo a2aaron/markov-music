@@ -1,6 +1,7 @@
 use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
+use markov::Chain;
 use markov_music::{
     quantize::{Quantizable, QuantizedSample},
     wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType},
@@ -49,30 +50,45 @@ enum Channel {
     Both,
 }
 
-fn quantize(signal: &[Sample], quantization_level: u32) -> (Vec<QuantizedSample>, Sample, Sample) {
+struct QuantizedBand {
+    signal: Vec<QuantizedSample>,
+    min: f64,
+    max: f64,
+}
+
+impl QuantizedBand {
+    fn with_signal(&self, signal: Vec<QuantizedSample>) -> QuantizedBand {
+        QuantizedBand {
+            signal,
+            min: self.min,
+            max: self.max,
+        }
+    }
+}
+
+fn quantize(signal: &[Sample], quantization_level: u32) -> QuantizedBand {
     let min = signal.iter().cloned().reduce(f64::min).unwrap();
     let max = signal.iter().cloned().reduce(f64::max).unwrap();
 
-    let quantized = signal
+    let signal = signal
         .iter()
         .map(|sample| Quantizable::quantize(*sample, min, max, quantization_level))
         .collect();
-    (quantized, min, max)
+    QuantizedBand { signal, min, max }
 }
 
-fn unquantize(
-    (signal, min, max): &(Vec<QuantizedSample>, Sample, Sample),
-    quantization_level: u32,
-) -> Vec<Sample> {
-    signal
+fn unquantize(band: &QuantizedBand, quantization_level: u32) -> Vec<Sample> {
+    band.signal
         .iter()
-        .map(|quantized| Quantizable::unquantize(*quantized, *min, *max, quantization_level))
+        .map(|quantized| {
+            Quantizable::unquantize(*quantized, band.min, band.max, quantization_level)
+        })
         .collect()
 }
 
 fn unquantize_bands(
-    detail_bands: &[(Vec<QuantizedSample>, f64, f64)],
-    approx_band: &(Vec<QuantizedSample>, f64, f64),
+    detail_bands: &[QuantizedBand],
+    approx_band: &QuantizedBand,
     quantization_level: u32,
 ) -> (Vec<Vec<f64>>, Vec<f64>) {
     let detail_bands = detail_bands
@@ -87,10 +103,7 @@ fn quantize_bands(
     detail_bands: &[Vec<f64>],
     approx_band: &[f64],
     quantization_level: u32,
-) -> (
-    Vec<(Vec<QuantizedSample>, f64, f64)>,
-    (Vec<QuantizedSample>, f64, f64),
-) {
+) -> (Vec<QuantizedBand>, QuantizedBand) {
     let detail_bands = detail_bands
         .iter()
         .map(|hi_pass| quantize(&hi_pass, quantization_level))
@@ -122,11 +135,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .iter()
                 .map(|x| (*x as Sample) / i16::MAX as Sample)
                 .collect();
+
             let (detail_bands, approx_band, _) =
                 wavelet_transform(&orig_samples, args.levels, args.wavelet);
 
             let (detail_bands, approx_band) =
                 quantize_bands(&detail_bands, &approx_band, args.quantization);
+
+            let (detail_bands, approx_band) = generate_markov(
+                &detail_bands,
+                &approx_band,
+                args.order,
+                args.length * sample_rate / 2usize.pow(args.levels as u32),
+            );
 
             let (detail_bands, approx_band) =
                 unquantize_bands(&detail_bands, &approx_band, args.quantization);
@@ -172,4 +193,90 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
 
     Ok(())
+}
+
+struct MarkovHeirachy {
+    approx_chain: Chain<QuantizedSample>,
+    detail_chains: Vec<Chain<QuantizedSample>>,
+}
+
+impl MarkovHeirachy {
+    fn train(detail_bands: &[QuantizedBand], approx_band: &QuantizedBand, order: usize) -> Self {
+        let mut approx_chain = Chain::of_order(order);
+        approx_chain.feed(&approx_band.signal);
+
+        let detail_chains = detail_bands
+            .iter()
+            .map(|detail_band| {
+                let mut detail_chain = Chain::of_order(order);
+                detail_chain.feed(&detail_band.signal);
+                detail_chain
+            })
+            .collect();
+
+        Self {
+            approx_chain,
+            detail_chains,
+        }
+    }
+
+    fn generate(&self, length: usize) -> (Vec<Vec<QuantizedSample>>, Vec<QuantizedSample>) {
+        let approx_signal = self
+            .approx_chain
+            .iter()
+            .flatten()
+            .take(length)
+            .collect::<Vec<_>>();
+
+        let num_layers = self.detail_chains.len();
+
+        let detail_signals = self
+            .detail_chains
+            .iter()
+            .enumerate()
+            .map(|(i, chain)| {
+                chain
+                    .iter()
+                    .flatten()
+                    .take({
+                        let length = length * 2usize.pow((num_layers - 1 - i) as u32);
+                        println!("detail {} length {}", i, length);
+                        length
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        println!("approx length: {}", approx_signal.len());
+
+        (detail_signals, approx_signal)
+    }
+}
+
+fn generate_markov(
+    detail_bands: &[QuantizedBand],
+    approx_band: &QuantizedBand,
+    order: usize,
+    length: usize,
+) -> (Vec<QuantizedBand>, QuantizedBand) {
+    let total_samples =
+        detail_bands.iter().map(|x| x.signal.len()).sum::<usize>() + approx_band.signal.len();
+    println!(
+        "Training Markov chain of order {} (total samples: {})",
+        order, total_samples
+    );
+    let markov_heirachry = MarkovHeirachy::train(detail_bands, approx_band, order);
+
+    println!("Generating Markov chain samples...");
+    let (detail_signals, approx_signal) = markov_heirachry.generate(length);
+
+    assert!(detail_signals.len() == detail_bands.len());
+
+    let detail_bands = detail_bands
+        .iter()
+        .zip(detail_signals.into_iter())
+        .map(|(band, signal)| band.with_signal(signal))
+        .collect();
+
+    (detail_bands, approx_band.with_signal(approx_signal))
 }

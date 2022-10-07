@@ -212,11 +212,16 @@ pub fn wavelet_transform(
     let filter = wavelet.filter();
     for _ in 0..num_levels {
         let approx = low_pass(&signal, &filter);
-        let detial = high_pass(&signal, &filter);
-        assert!(approx.len() == detial.len());
+        let detail = high_pass(&signal, &filter);
+        assert!(
+            approx.len() == detail.len(),
+            "Expected approx and detail bands to have same length. Got approx: {} and detail: {}",
+            approx.len(),
+            detail.len()
+        );
         assert!(approx.len() * 2 == signal.len());
 
-        detail_bands.push(detial);
+        detail_bands.push(detail);
         approx_band.push(approx.clone());
         signal = approx;
     }
@@ -224,7 +229,12 @@ pub fn wavelet_transform(
 }
 
 fn upsample(approx: &Signal, detail: &Signal, wavelet: WaveletType) -> Signal {
-    assert!(approx.len() == detail.len());
+    assert!(
+        approx.len() == detail.len(),
+        "Expected approx and detail bands to have same length. Got approx: {} and detail: {}",
+        approx.len(),
+        detail.len()
+    );
     let interleave = interleave_exact(approx, detail).cloned().collect();
 
     let filter = wavelet.inverse_filter();
