@@ -4,7 +4,7 @@ use clap::{command, Parser, ValueEnum};
 use markov::Chain;
 use markov_music::{
     quantize::{Quantizable, QuantizedSample},
-    wavelet::{wavelet_transform, wavelet_untransform, Sample, WaveletType},
+    wavelet::{nearest_power_of_two, wavelet_transform, wavelet_untransform, Sample, WaveletType},
 };
 
 mod util;
@@ -146,7 +146,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &detail_bands,
                 &approx_band,
                 args.order,
-                args.length * sample_rate / 2usize.pow(args.levels as u32),
+                args.length * sample_rate,
             );
 
             let (detail_bands, approx_band) =
@@ -221,14 +221,15 @@ impl MarkovHeirachy {
     }
 
     fn generate(&self, length: usize) -> (Vec<Vec<QuantizedSample>>, Vec<QuantizedSample>) {
+        let num_layers = self.detail_chains.len();
+        let length = nearest_power_of_two(length, num_layers);
+
         let approx_signal = self
             .approx_chain
             .iter()
             .flatten()
-            .take(length)
+            .take(length / 2usize.pow(num_layers as u32))
             .collect::<Vec<_>>();
-
-        let num_layers = self.detail_chains.len();
 
         let detail_signals = self
             .detail_chains
@@ -239,15 +240,15 @@ impl MarkovHeirachy {
                     .iter()
                     .flatten()
                     .take({
-                        let length = length * 2usize.pow((num_layers - 1 - i) as u32);
-                        println!("detail {} length {}", i, length);
+                        let length = length / 2usize.pow((i + 1) as u32);
+                        println!("detail band {}: length {}", i, length);
                         length
                     })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
 
-        println!("approx length: {}", approx_signal.len());
+        println!("approx band: length: {}", approx_signal.len());
 
         (detail_signals, approx_signal)
     }
@@ -267,7 +268,10 @@ fn generate_markov(
     );
     let markov_heirachry = MarkovHeirachy::train(detail_bands, approx_band, order);
 
-    println!("Generating Markov chain samples...");
+    println!(
+        "Generating Markov chain samples... (total samples: {})",
+        length
+    );
     let (detail_signals, approx_signal) = markov_heirachry.generate(length);
 
     assert!(detail_signals.len() == detail_bands.len());

@@ -188,6 +188,13 @@ fn high_pass(signal: &Signal, filter: &Convolution) -> Signal {
     filter.quadrature_mirror().convolve(signal)
 }
 
+pub fn nearest_power_of_two(x: usize, power_of_two: usize) -> usize {
+    let power_of_two = 2usize.pow(power_of_two as u32);
+    let rounded = x - x % power_of_two;
+    assert_eq!(rounded % power_of_two, 0);
+    rounded
+}
+
 pub fn wavelet_transform(
     orig_signal: &Signal,
     num_levels: usize,
