@@ -227,6 +227,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn print_statistics<T: Chainable>(chain: &Chain<T>) {
+    let hashmap = chain.get_hashmap();
+
+    let mut deterministic_states = 0;
+    let mut total_choices = 0;
+    let total_states = hashmap.len();
+    for (_, next_states) in hashmap.iter() {
+        let choices = next_states.len();
+        total_choices += choices;
+        if choices == 0 || choices == 1 {
+            deterministic_states += 1;
+        }
+    }
+
+    println!(
+        "Order: {}, Total states: {}, deterministic states: {}, average determinism: {:.2}%, average choices per state: {:.2}",
+        chain.get_order(),
+        total_states,
+        deterministic_states,
+        100.0 * (deterministic_states as f32 / total_states as f32),
+        (total_choices as f32 / total_states as f32),
+    )
+}
+
 struct MarkovHeirachy {
     approx_chain: Chain<QuantizedSample>,
     detail_chains: Vec<Chain<QuantizedSample>>,
@@ -261,13 +285,8 @@ impl MarkovHeirachy {
             })
             .collect();
 
-        println!(
-            "Training approx chain   ({} samples, order {})",
-            approx_band.signal.len(),
-            orders[0]
-        );
-        let mut approx_chain = Chain::of_order(orders[0]);
-        approx_chain.feed(&approx_band.signal);
+        print_statistics(&approx_chain);
+        detail_chains.iter().for_each(print_statistics);
 
         Self {
             approx_chain,
