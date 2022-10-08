@@ -1,10 +1,13 @@
 use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
-use markov::Chain;
+use markov::{Chain, Chainable};
 use markov_music::{
     quantize::{Quantizable, QuantizedSample},
-    wavelet::{nearest_power_of_two, wavelet_transform, wavelet_untransform, Sample, WaveletType},
+    wavelet::{
+        nearest_power_of_two, wavelet_transform, wavelet_untransform, Sample, Signal,
+        WaveletHeirarchy, WaveletSignal, WaveletType,
+    },
 };
 
 mod util;
@@ -21,17 +24,15 @@ struct Args {
     out_path: String,
     /// Markov chain order. Higher values means the output is less chaotic, but more deterministic.
     /// Recommended values are betwee 3 and 8, depending on the length and type of input file. This
-    /// is specified per band. The first value is the approximation band, then followed by the last
-    /// detail band to the first detail band. (Here, "last" detail band means the shortest detail
-    /// band, and hence the lowest-frequency detail band. Similarly, "first" detail band means the
+    /// is specified per band. The first value is the approximation band, then followed by the first
+    /// detail band to the last detail band. (Here, "first" detail band means the shortest detail
+    /// band, and hence the lowest-frequency detail band. Similarly, "last" detail band means the
     /// longest detail band, and hence the highest-frequency band). Since each successive detail
-    /// band is twice as long as the previous, it is recommended that the bands follow a power-of-two
-    /// heirachy. If there are less values specified by this flag than there are bands, the last
-    /// value specified is applied to all the other bands, doubled for each successive detail band.
-    /// For example, "--levels 5 --order 3" is the same as "--levels 5 --order 3 3 6 12 24". This
-    /// process caps out at order 128 (going too high results in extremely slow generation--you can
-    /// manually override this limit)
-    #[arg(short, long, required = true, num_args = 1..)]
+    /// band is twice as long as the previous, it is recommended that higher bands have higher order.
+    /// If there are less values specified by this flag than there are bands, the last
+    /// value specified is applied to all the other bands For example,
+    /// "--levels 5 --order 3" is the same as "--levels 5 --order 3 3 3 3 3".
+    #[arg(long, required = true, num_args = 1..)]
     order: Vec<usize>,
     /// The number of levels to quantize to. This value is applied to every channel equally.
     #[arg(long, default_value_t = 256)]
@@ -76,6 +77,12 @@ impl QuantizedBand {
     }
 }
 
+impl WaveletSignal for QuantizedBand {
+    fn len(&self) -> usize {
+        self.signal.len()
+    }
+}
+
 fn quantize(signal: &[Sample], quantization_level: u32) -> QuantizedBand {
     let min = signal.iter().cloned().reduce(f64::min).unwrap();
     let max = signal.iter().cloned().reduce(f64::max).unwrap();
@@ -97,29 +104,29 @@ fn unquantize(band: &QuantizedBand, quantization_level: u32) -> Vec<Sample> {
 }
 
 fn unquantize_bands(
-    detail_bands: &[QuantizedBand],
-    approx_band: &QuantizedBand,
+    wavelets: &WaveletHeirarchy<QuantizedBand>,
     quantization_level: u32,
-) -> (Vec<Vec<f64>>, Vec<f64>) {
-    let detail_bands = detail_bands
+) -> WaveletHeirarchy<Signal> {
+    let detail_bands = wavelets
+        .detail_bands
         .iter()
         .map(|hi_pass| unquantize(&hi_pass, quantization_level))
         .collect::<Vec<_>>();
-    let approx_band = unquantize(&approx_band, quantization_level);
-    (detail_bands, approx_band)
+    let approx_band = unquantize(&wavelets.approx_band, quantization_level);
+    WaveletHeirarchy::new(approx_band, detail_bands)
 }
 
 fn quantize_bands(
-    detail_bands: &[Vec<f64>],
-    approx_band: &[f64],
+    wavelets: &WaveletHeirarchy<Signal>,
     quantization_level: u32,
-) -> (Vec<QuantizedBand>, QuantizedBand) {
-    let detail_bands = detail_bands
+) -> WaveletHeirarchy<QuantizedBand> {
+    let detail_bands = wavelets
+        .detail_bands
         .iter()
         .map(|hi_pass| quantize(&hi_pass, quantization_level))
         .collect();
-    let approx_band = quantize(&approx_band, quantization_level);
-    (detail_bands, approx_band)
+    let approx_band = quantize(&wavelets.approx_band, quantization_level);
+    WaveletHeirarchy::new(approx_band, detail_bands)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -152,12 +159,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else if orders.len() < args.levels + 1 {
         while orders.len() != args.levels + 1 {
             let last_value = *orders.last().unwrap();
-            let value = if orders.len() == 1 {
-                last_value
-            } else {
-                last_value * 2
-            };
-            orders.push(value.min(128));
+            orders.push(last_value);
         }
     }
 
@@ -169,30 +171,40 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|x| (*x as Sample) / i16::MAX as Sample)
                 .collect();
 
-            let (detail_bands, approx_band, _) =
-                wavelet_transform(&orig_samples, args.levels, args.wavelet);
+            let wavelets = wavelet_transform(&orig_samples, args.levels, args.wavelet);
+            let wavelets = quantize_bands(&wavelets, args.quantization);
+            let wavelets = generate_markov(&wavelets, &orders, args.length * sample_rate);
+            let wavelets = unquantize_bands(&wavelets, args.quantization);
 
-            let (detail_bands, approx_band) =
-                quantize_bands(&detail_bands, &approx_band, args.quantization);
-
-            let (detail_bands, approx_band) = generate_markov(
-                &detail_bands,
-                &approx_band,
-                &orders,
-                args.length * sample_rate,
-            );
-
-            let (detail_bands, approx_band) =
-                unquantize_bands(&detail_bands, &approx_band, args.quantization);
-
-            let samples = wavelet_untransform(&detail_bands, &approx_band, args.wavelet);
+            let samples = wavelet_untransform(&wavelets, args.wavelet);
 
             if args.debug {
-                println!("Layers: {}, Wavelet: {:?}", args.levels, args.wavelet);
+                println!("Generating solo-band samples...");
+                let mut additional_samples = vec![];
+
+                {
+                    let mut wavelets = wavelets.clone();
+                    wavelets.detail_bands.iter_mut().for_each(|x| x.fill(0.0));
+                    println!("Generating solo-band for approx band");
+                    let samples = wavelet_untransform(&wavelets, args.wavelet);
+                    additional_samples.push(samples);
+                }
+                for i in 0..wavelets.levels() {
+                    let mut wavelets = wavelets.clone();
+                    wavelets.approx_band.fill(0.0);
+                    for j in 0..wavelets.levels() {
+                        if i != j {
+                            wavelets.detail_bands[j].fill(0.0);
+                        }
+                    }
+                    println!("Generating solo-band for detail band {}", i);
+                    let samples = wavelet_untransform(&wavelets, args.wavelet);
+                    additional_samples.push(samples);
+                }
+
                 samples
                     .iter()
-                    .chain(detail_bands.iter().flatten())
-                    .chain(approx_band.iter())
+                    .chain(additional_samples.iter().flatten())
                     .cloned()
                     .map(|x| (x * i16::MAX as Sample * 0.5) as i16)
                     .collect()
@@ -222,16 +234,21 @@ struct MarkovHeirachy {
 
 impl MarkovHeirachy {
     // Train a MarkovHeirachy on the given detail and approximation bands, with the given orders.
-    fn train(
-        detail_bands: &[QuantizedBand],
-        approx_band: &QuantizedBand,
-        orders: &[usize],
-    ) -> Self {
-        let detail_chains = detail_bands
+    fn train(wavelets: &WaveletHeirarchy<QuantizedBand>, orders: &[usize]) -> Self {
+        println!(
+            "Training approx chain   ({} samples, order {})",
+            wavelets.approx_band.signal.len(),
+            orders[0]
+        );
+        let mut approx_chain = Chain::of_order(orders[0]);
+        approx_chain.feed(&wavelets.approx_band.signal);
+
+        let detail_chains: Vec<_> = wavelets
+            .detail_bands
             .iter()
             .enumerate()
             .map(|(i, detail_band)| {
-                let order = orders[orders.len() - 1 - i];
+                let order = orders[i + 1];
                 let mut detail_chain = Chain::of_order(order);
                 println!(
                     "Training detail chain {} ({} samples, order {})",
@@ -269,12 +286,7 @@ impl MarkovHeirachy {
         // indexing. This is because each layer is half of the prior signal. Hence, the first layer
         // (layer 0) is actually half the length of the input audio. Therefore, we need to add one
         // to the exponent when dividing by 2^n in order to account for this.
-        let approx_signal = self
-            .approx_chain
-            .iter()
-            .flatten()
-            .take(length / 2usize.pow(num_layers as u32))
-            .collect::<Vec<_>>();
+        let length = length / 2usize.pow(num_layers as u32);
 
         let detail_signals = self
             .detail_chains
@@ -284,9 +296,16 @@ impl MarkovHeirachy {
                 chain
                     .iter()
                     .flatten()
-                    .take(length / 2usize.pow((i + 1) as u32))
+                    .take(length * 2usize.pow(i as u32))
                     .collect::<Vec<_>>()
             })
+            .collect::<Vec<_>>();
+
+        let approx_signal = self
+            .approx_chain
+            .iter()
+            .flatten()
+            .take(length)
             .collect::<Vec<_>>();
 
         (detail_signals, approx_signal)
@@ -294,18 +313,21 @@ impl MarkovHeirachy {
 }
 
 fn generate_markov(
-    detail_bands: &[QuantizedBand],
-    approx_band: &QuantizedBand,
+    wavelets: &WaveletHeirarchy<QuantizedBand>,
     orders: &[usize],
     length: usize,
-) -> (Vec<QuantizedBand>, QuantizedBand) {
-    let total_samples =
-        detail_bands.iter().map(|x| x.signal.len()).sum::<usize>() + approx_band.signal.len();
+) -> WaveletHeirarchy<QuantizedBand> {
+    let total_samples = wavelets
+        .detail_bands
+        .iter()
+        .map(|x| x.signal.len())
+        .sum::<usize>()
+        + wavelets.approx_band.signal.len();
     println!(
         "Training Markov chain of orders {:?} (total samples: {})",
         orders, total_samples
     );
-    let markov_heirachry = MarkovHeirachy::train(detail_bands, approx_band, orders);
+    let markov_heirachry = MarkovHeirachy::train(&wavelets, orders);
 
     println!(
         "Generating Markov chain samples... (total samples: {})",
@@ -313,13 +335,15 @@ fn generate_markov(
     );
     let (detail_signals, approx_signal) = markov_heirachry.generate(length);
 
-    assert!(detail_signals.len() == detail_bands.len());
-
-    let detail_bands = detail_bands
+    let detail_bands = wavelets
+        .detail_bands
         .iter()
         .zip(detail_signals.into_iter())
         .map(|(band, signal)| band.with_signal(signal))
         .collect();
 
-    (detail_bands, approx_band.with_signal(approx_signal))
+    WaveletHeirarchy::new(
+        wavelets.approx_band.with_signal(approx_signal),
+        detail_bands,
+    )
 }

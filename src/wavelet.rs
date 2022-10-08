@@ -3,7 +3,7 @@
 
 use clap::ValueEnum;
 
-type Signal = Vec<Sample>;
+pub type Signal = Vec<Sample>;
 pub type Sample = f64;
 
 fn interleave_exact<'a, T>(a: &'a [T], b: &'a [T]) -> impl Iterator<Item = &'a T> {
@@ -195,11 +195,49 @@ pub fn nearest_power_of_two(x: usize, power_of_two: usize) -> usize {
     rounded
 }
 
+pub trait WaveletSignal {
+    fn len(&self) -> usize;
+}
+
+impl WaveletSignal for Signal {
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WaveletHeirarchy<T: WaveletSignal> {
+    // The detail bands. This is stored such that detail_bands[0] is the shortest band while
+    // detail_bands[n - 1] is the longest band (this means that they are stored in the opposite
+    // order than you might expect--the first "layer" is stored last). This is done so that it is
+    // easier to work with the bands during the untransform step.
+    pub detail_bands: Vec<T>,
+    // The approximation band. This must be the same length as detail_bands[0]
+    pub approx_band: T,
+}
+
+impl<T: WaveletSignal> WaveletHeirarchy<T> {
+    pub fn new(approx_band: T, detail_bands: Vec<T>) -> WaveletHeirarchy<T> {
+        assert!(approx_band.len() == detail_bands[0].len());
+        for i in 0..(detail_bands.len() - 1) {
+            assert!(detail_bands[i].len() * 2 == detail_bands[i + 1].len());
+        }
+        WaveletHeirarchy {
+            detail_bands,
+            approx_band,
+        }
+    }
+
+    pub fn levels(&self) -> usize {
+        self.detail_bands.len()
+    }
+}
+
 pub fn wavelet_transform(
     orig_signal: &Signal,
     num_levels: usize,
     wavelet: WaveletType,
-) -> (Vec<Signal>, Signal, Vec<Signal>) {
+) -> WaveletHeirarchy<Signal> {
     let mut signal = orig_signal.clone();
 
     let power_of_two = 2usize.pow(num_levels as u32);
@@ -215,7 +253,6 @@ pub fn wavelet_transform(
     }
 
     let mut detail_bands = vec![];
-    let mut approx_band = vec![];
     let filter = wavelet.filter();
     for _ in 0..num_levels {
         let approx = low_pass(&signal, &filter);
@@ -229,10 +266,12 @@ pub fn wavelet_transform(
         assert!(approx.len() * 2 == signal.len());
 
         detail_bands.push(detail);
-        approx_band.push(approx.clone());
         signal = approx;
     }
-    (detail_bands, signal, approx_band)
+
+    detail_bands.reverse();
+
+    WaveletHeirarchy::new(signal, detail_bands)
 }
 
 fn upsample(approx: &Signal, detail: &Signal, wavelet: WaveletType) -> Signal {
@@ -253,13 +292,9 @@ fn upsample(approx: &Signal, detail: &Signal, wavelet: WaveletType) -> Signal {
     interleave
 }
 
-pub fn wavelet_untransform(
-    detail_bands: &[Signal],
-    approx_band: &Signal,
-    wavelet: WaveletType,
-) -> Signal {
-    let mut out_signal = approx_band.clone();
-    for detail in detail_bands.iter().rev() {
+pub fn wavelet_untransform(wavelets: &WaveletHeirarchy<Signal>, wavelet: WaveletType) -> Signal {
+    let mut out_signal = wavelets.approx_band.clone();
+    for detail in wavelets.detail_bands.iter() {
         out_signal = upsample(&out_signal, detail, wavelet);
     }
     out_signal
