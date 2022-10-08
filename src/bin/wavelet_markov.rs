@@ -28,7 +28,9 @@ struct Args {
     /// band is twice as long as the previous, it is recommended that the bands follow a power-of-two
     /// heirachy. If there are less values specified by this flag than there are bands, the last
     /// value specified is applied to all the other bands, doubled for each successive detail band.
-    /// For example, "--levels 5 --order 3" is the same as "--levels 5 --order 3 3 6 12 24"
+    /// For example, "--levels 5 --order 3" is the same as "--levels 5 --order 3 3 6 12 24". This
+    /// process caps out at order 128 (going too high results in extremely slow generation--you can
+    /// manually override this limit)
     #[arg(short, long, required = true, num_args = 1..)]
     order: Vec<usize>,
     /// The number of levels to quantize to. This value is applied to every channel equally.
@@ -150,11 +152,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else if orders.len() < args.levels + 1 {
         while orders.len() != args.levels + 1 {
             let last_value = *orders.last().unwrap();
-            if orders.len() == 1 {
-                orders.push(last_value);
+            let value = if orders.len() == 1 {
+                last_value
             } else {
-                orders.push(last_value * 2);
-            }
+                last_value * 2
+            };
+            orders.push(value.min(128));
         }
     }
 
