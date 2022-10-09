@@ -81,18 +81,26 @@ impl<T: Chainable> Chain<T> {
 
     /// Return some statistical information about the Markov chain
     /// The returned tuple is (total_states, total_choices, deterministic_states)
-    pub fn get_stats(&self) -> (usize, usize, usize) {
+    pub fn get_stats(&self) -> (usize, usize, usize, usize) {
         let mut deterministic_states = 0;
         let mut total_choices = 0;
+        let mut empty_states = 0;
         let total_states = self.map.len();
         for (_, next_states) in self.map.iter() {
             let choices = next_states.len();
             total_choices += choices;
-            if choices == 0 || choices == 1 {
+            if choices == 1 {
                 deterministic_states += 1;
+            } else if choices == 0 {
+                empty_states += 1;
             }
         }
-        (total_states, total_choices, deterministic_states)
+        (
+            total_states,
+            total_choices,
+            deterministic_states,
+            empty_states,
+        )
     }
 }
 
@@ -123,4 +131,21 @@ impl<'a, T: Chainable> Iterator for InfiniteIterator<'a, T> {
 
 pub fn split_into_windows<T>(data: &[T], window_size: usize) -> impl Iterator<Item = &[T]> {
     (0..(data.len() - window_size)).map(move |i| &data[i..i + window_size])
+}
+
+pub fn print_statistics<T: Chainable>(chain: &Chain<T>) {
+    let (total_states, total_choices, deterministic_states, empty_states) = chain.get_stats();
+
+    println!(
+        "Order: {}, Total states: {}, empty/deter/other states: {}/{}/{}, average empty/deter/other: {:.2}/{:.2}/{:.2}%, average choices per state: {:.2}",
+        chain.get_order(),
+        total_states,
+        empty_states,
+        deterministic_states,
+        total_states - empty_states - deterministic_states,
+        100.0 * (empty_states as f32 / total_states as f32),
+        100.0 * (deterministic_states as f32 / total_states as f32),
+        100.0 * ((total_states - empty_states - deterministic_states) as f32 / total_states as f32),
+        (total_choices as f32 / total_states as f32),
+    )
 }

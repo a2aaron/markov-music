@@ -2,7 +2,7 @@ use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
 use markov_music::{
-    markov::{Chain, Chainable},
+    markov::{print_statistics, Chain, Chainable},
     quantize::{Quantizable, QuantizedSample},
 };
 
@@ -128,7 +128,7 @@ fn generate<C: Chainable>(samples: &[C], order: usize, length: usize) -> Vec<C> 
         samples.len()
     );
     let chain = Chain::new(samples, order).unwrap();
-
+    print_statistics(&chain);
     println!("Generating Markov chain... ({} samples)", length);
     chain.iter_from_start().take(length).collect()
 }

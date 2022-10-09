@@ -2,7 +2,7 @@ use std::{cmp::Ordering, error::Error};
 
 use clap::{command, Parser, ValueEnum};
 use markov_music::{
-    markov::{Chain, Chainable},
+    markov::{print_statistics, Chain, Chainable},
     quantize::{Quantizable, QuantizedSample},
     wavelet::{
         nearest_power_of_two, wavelet_transform, wavelet_untransform, Sample, WaveletHeirarchy,
@@ -354,19 +354,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
 
     Ok(())
-}
-
-fn print_statistics<T: Chainable>(chain: &Chain<T>) {
-    let (total_states, total_choices, deterministic_states) = chain.get_stats();
-
-    println!(
-        "Order: {}, Total states: {}, deterministic states: {}, average determinism: {:.2}%, average choices per state: {:.2}",
-        chain.get_order(),
-        total_states,
-        deterministic_states,
-        100.0 * (deterministic_states as f32 / total_states as f32),
-        (total_choices as f32 / total_states as f32),
-    )
 }
 
 struct MarkovHeirachy {
