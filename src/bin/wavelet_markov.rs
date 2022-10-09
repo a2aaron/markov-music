@@ -171,7 +171,7 @@ impl QuantizedHeirarchy {
     }
 }
 
-#[derive(Debug, Clone, Eq, Hash)]
+#[derive(Debug, Clone, Eq)]
 struct WaveletToken<'a> {
     approx_sample: &'a QuantizedSample,
     detail_samples: Vec<&'a [QuantizedSample]>,
@@ -180,6 +180,12 @@ struct WaveletToken<'a> {
 impl PartialEq for WaveletToken<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.approx_sample == other.approx_sample // && self.detail_samples == other.detail_samples
+    }
+}
+
+impl std::hash::Hash for WaveletToken<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.approx_sample.hash(state);
     }
 }
 
