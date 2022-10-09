@@ -2,14 +2,13 @@ use std::{cmp::Ordering, error::Error};
 
 use clap::{command, Parser, ValueEnum};
 use markov_music::{
-    markov::{print_statistics, Chain, Chainable},
+    markov::{print_statistics, Chain},
     quantize::{Quantizable, QuantizedSample},
     wavelet::{
         nearest_power_of_two, wavelet_transform, wavelet_untransform, Sample, WaveletHeirarchy,
         WaveletType,
     },
 };
-use rand::seq::SliceRandom;
 
 mod util;
 
@@ -65,6 +64,7 @@ enum Channel {
     Both,
 }
 
+#[derive(Debug)]
 struct QuantizedBand {
     signal: Vec<QuantizedSample>,
     min: f64,
@@ -105,6 +105,7 @@ impl QuantizedBand {
     }
 }
 
+#[derive(Debug)]
 struct QuantizedHeirarchy {
     approx_band: QuantizedBand,
     detail_bands: Vec<QuantizedBand>,
@@ -154,13 +155,14 @@ impl QuantizedHeirarchy {
         let (approx_signal, detail_signals) = tokens.iter().fold(
             (vec![], vec![vec![]; num_layers]),
             |(mut approx_signal, mut detail_signals), token| {
-                approx_signal.push(*token.approx_sample);
+                let (approx_sample, detail_samples) = token.get_samples();
+                approx_signal.push(approx_sample);
 
-                assert!(token.detail_samples.len() == num_layers);
+                assert!(detail_samples.len() == num_layers);
                 for (detail_samples, detail_signal) in
-                    token.detail_samples.iter().zip(detail_signals.iter_mut())
+                    detail_samples.iter().zip(detail_signals.iter_mut())
                 {
-                    detail_signal.extend_from_slice(*detail_samples);
+                    detail_signal.extend_from_slice(detail_samples);
                 }
 
                 (approx_signal, detail_signals)
@@ -185,42 +187,56 @@ impl QuantizedHeirarchy {
     fn tokenize<'a>(&'a self) -> Vec<WaveletToken<'a>> {
         let mut tokens = vec![];
         for i in 0..self.approx_band.len() {
-            let approx_sample = &self.approx_band.signal[i];
-            let mut detail_samples = vec![];
-            for j in 0..self.detail_bands.len() {
-                let window = 2usize.pow(j as u32);
-                let lower = i * window;
-                let upper = (i + 1) * window;
-                detail_samples.push(&self.detail_bands[j].signal[lower..upper]);
-            }
+            // let approx_sample = &self.approx_band.signal[i];
+            // let mut detail_samples = vec![];
+            // for j in 0..self.detail_bands.len() {
+            //     let window = 2usize.pow(j as u32);
+            //     let lower = i * window;
+            //     let upper = (i + 1) * window;
+            //     detail_samples.push(&self.detail_bands[j].signal[lower..upper]);
+            // }
             tokens.push(WaveletToken {
-                approx_sample,
-                detail_samples,
+                approx_sample: i,
+                wavelets: self,
+                // approx_sample,
+                // detail_samples,
             });
         }
         tokens
     }
 }
 
-#[derive(Debug, Clone, Eq, Ord)]
+#[derive(Debug, Clone)]
 struct WaveletToken<'a> {
-    approx_sample: &'a QuantizedSample,
-    detail_samples: Vec<&'a [QuantizedSample]>,
+    approx_sample: usize,
+    wavelets: &'a QuantizedHeirarchy,
 }
 
 impl<'a> WaveletToken<'a> {
+    fn get_samples(&self) -> (QuantizedSample, Vec<&[QuantizedSample]>) {
+        let wavelets = self.wavelets;
+        let i = self.approx_sample;
+        let approx_sample = wavelets.approx_band.signal[i];
+        let mut detail_samples = Vec::with_capacity(wavelets.levels());
+        for j in 0..wavelets.detail_bands.len() {
+            let window = 2usize.pow(j as u32);
+            let lower = i * window;
+            let upper = (i + 1) * window;
+            detail_samples.push(&wavelets.detail_bands[j].signal[lower..upper]);
+        }
+
+        (approx_sample, detail_samples)
+    }
+
     fn cmp_list(&self, other: &WaveletToken) -> Vec<Ordering> {
         let mut list = vec![];
-        assert!(self.detail_samples.len() == other.detail_samples.len());
-        for (this, other) in self
-            .detail_samples
-            .iter()
-            .zip(other.detail_samples.iter())
-            .rev()
-        {
+        let (approx_self, detail_self) = self.get_samples();
+        let (approx_other, detail_other) = other.get_samples();
+        assert!(detail_self.len() == detail_other.len());
+        for (this, other) in detail_self.iter().zip(detail_other.iter()).rev() {
             list.push(this[0].abs().cmp(&other[0].abs()));
         }
-        list.push(self.approx_sample.abs().cmp(&other.approx_sample.abs()));
+        list.push(approx_self.abs().cmp(&approx_other.abs()));
         list
     }
 }
@@ -243,6 +259,13 @@ impl PartialOrd for WaveletToken<'_> {
             .copied()
             .unwrap_or(Ordering::Equal);
         Some(cmp)
+    }
+}
+
+impl Eq for WaveletToken<'_> {}
+impl Ord for WaveletToken<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }
 
