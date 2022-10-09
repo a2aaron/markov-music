@@ -32,6 +32,7 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    std::env::set_var("RUST_BACKTRACE", "1");
     let args = Args::parse();
 
     let raw = std::fs::read(args.in_path)?;

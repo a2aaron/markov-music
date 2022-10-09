@@ -1,8 +1,10 @@
 use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
-use markov::{Chain, Chainable};
-use markov_music::quantize::{Quantizable, QuantizedSample};
+use markov_music::{
+    markov::{Chain, Chainable},
+    quantize::{Quantizable, QuantizedSample},
+};
 
 mod util;
 
@@ -125,9 +127,8 @@ fn generate<C: Chainable>(samples: &[C], order: usize, length: usize) -> Vec<C> 
         order,
         samples.len()
     );
-    let mut chain = Chain::of_order(order);
-    chain.feed(samples);
+    let chain = Chain::new(samples, order).unwrap();
 
     println!("Generating Markov chain... ({} samples)", length);
-    chain.iter().flatten().take(length).collect()
+    chain.iter_from_start().take(length).collect()
 }

@@ -1,8 +1,8 @@
 use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
-use markov::{Chain, Chainable};
 use markov_music::{
+    markov::{Chain, Chainable},
     quantize::{Quantizable, QuantizedSample},
     wavelet::{
         nearest_power_of_two, wavelet_transform, wavelet_untransform, Sample, Signal,
@@ -228,18 +228,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn print_statistics<T: Chainable>(chain: &Chain<T>) {
-    let hashmap = chain.get_hashmap();
-
-    let mut deterministic_states = 0;
-    let mut total_choices = 0;
-    let total_states = hashmap.len();
-    for (_, next_states) in hashmap.iter() {
-        let choices = next_states.len();
-        total_choices += choices;
-        if choices == 0 || choices == 1 {
-            deterministic_states += 1;
-        }
-    }
+    let (total_states, total_choices, deterministic_states) = chain.get_stats();
 
     println!(
         "Order: {}, Total states: {}, deterministic states: {}, average determinism: {:.2}%, average choices per state: {:.2}",
@@ -264,8 +253,7 @@ impl MarkovHeirachy {
             wavelets.approx_band.signal.len(),
             orders[0]
         );
-        let mut approx_chain = Chain::of_order(orders[0]);
-        approx_chain.feed(&wavelets.approx_band.signal);
+        let approx_chain = Chain::new(&wavelets.approx_band.signal, orders[0]).unwrap();
 
         let detail_chains: Vec<_> = wavelets
             .detail_bands
@@ -273,15 +261,13 @@ impl MarkovHeirachy {
             .enumerate()
             .map(|(i, detail_band)| {
                 let order = orders[i + 1];
-                let mut detail_chain = Chain::of_order(order);
                 println!(
                     "Training detail chain {} ({} samples, order {})",
                     i,
                     detail_band.signal.len(),
                     order
                 );
-                detail_chain.feed(&detail_band.signal);
-                detail_chain
+                Chain::new(&detail_band.signal, order).unwrap()
             })
             .collect();
 
@@ -313,8 +299,7 @@ impl MarkovHeirachy {
             .enumerate()
             .map(|(i, chain)| {
                 chain
-                    .iter()
-                    .flatten()
+                    .iter_from_start()
                     .take(length * 2usize.pow(i as u32))
                     .collect::<Vec<_>>()
             })
@@ -322,8 +307,7 @@ impl MarkovHeirachy {
 
         let approx_signal = self
             .approx_chain
-            .iter()
-            .flatten()
+            .iter_from_start()
             .take(length)
             .collect::<Vec<_>>();
 

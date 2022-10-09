@@ -3,6 +3,7 @@
 #![feature(iter_intersperse)]
 
 pub mod chaos;
+pub mod markov;
 pub mod midi;
 pub mod notes;
 pub mod quantize;

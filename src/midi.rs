@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, error::Error};
 
-use markov::Chain;
 use midly::{num::u4, MetaMessage, MidiMessage, TrackEvent, TrackEventKind};
 
+use crate::markov::Chain;
 use crate::notes::{MidiInfo, Note, NoteDuration};
 
 use crate::notes::MarkovNote;
@@ -118,19 +118,18 @@ pub fn generate_markov<'a>(
             .collect::<Vec<_>>()
     };
 
-    // Do chain generation, if the chain has any notes. Note that, for some reason, the markov
-    // crate panics if nothing has been fed to it ever, so we must skip generation if there are
-    // no notes to feed.
-    let mut chain = Chain::of_order(order);
-    let markov_notes: Box<dyn Iterator<Item = MarkovNote>> = if markov_notes.is_empty() {
-        Box::new(markov_notes.iter().cloned())
-    } else {
+    // Do chain generation, if the chain has any notes.
+    let markov_notes = if let Ok(chain) = Chain::new(&markov_notes, order) {
         let mut length = 0;
-        chain.feed(&markov_notes);
-        Box::new(chain.iter().flatten().take_while(move |note| {
-            length += note.length;
-            length < quantization.from_beats(measures * 4) as u32
-        }))
+        chain
+            .iter_from_start()
+            .take_while(move |note| {
+                length += note.length;
+                length < quantization.from_beats(measures * 4) as u32
+            })
+            .collect()
+    } else {
+        markov_notes
     };
 
     // Finally, turn the MarkovNotes back into regular Notes
