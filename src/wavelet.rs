@@ -195,29 +195,19 @@ pub fn nearest_power_of_two(x: usize, power_of_two: usize) -> usize {
     rounded
 }
 
-pub trait WaveletSignal {
-    fn len(&self) -> usize;
-}
-
-impl WaveletSignal for Signal {
-    fn len(&self) -> usize {
-        self.len()
-    }
-}
-
 #[derive(Debug, Clone)]
-pub struct WaveletHeirarchy<T: WaveletSignal> {
+pub struct WaveletHeirarchy {
     // The detail bands. This is stored such that detail_bands[0] is the shortest band while
     // detail_bands[n - 1] is the longest band (this means that they are stored in the opposite
     // order than you might expect--the first "layer" is stored last). This is done so that it is
     // easier to work with the bands during the untransform step.
-    pub detail_bands: Vec<T>,
+    pub detail_bands: Vec<Signal>,
     // The approximation band. This must be the same length as detail_bands[0]
-    pub approx_band: T,
+    pub approx_band: Signal,
 }
 
-impl<T: WaveletSignal> WaveletHeirarchy<T> {
-    pub fn new(approx_band: T, detail_bands: Vec<T>) -> WaveletHeirarchy<T> {
+impl WaveletHeirarchy {
+    pub fn new(approx_band: Signal, detail_bands: Vec<Signal>) -> WaveletHeirarchy {
         assert!(approx_band.len() == detail_bands[0].len());
         for i in 0..(detail_bands.len() - 1) {
             assert!(detail_bands[i].len() * 2 == detail_bands[i + 1].len());
@@ -237,7 +227,7 @@ pub fn wavelet_transform(
     orig_signal: &Signal,
     num_levels: usize,
     wavelet: WaveletType,
-) -> WaveletHeirarchy<Signal> {
+) -> WaveletHeirarchy {
     let mut signal = orig_signal.clone();
 
     let power_of_two = 2usize.pow(num_levels as u32);
@@ -292,7 +282,7 @@ fn upsample(approx: &Signal, detail: &Signal, wavelet: WaveletType) -> Signal {
     interleave
 }
 
-pub fn wavelet_untransform(wavelets: &WaveletHeirarchy<Signal>, wavelet: WaveletType) -> Signal {
+pub fn wavelet_untransform(wavelets: &WaveletHeirarchy, wavelet: WaveletType) -> Signal {
     let mut out_signal = wavelets.approx_band.clone();
     for detail in wavelets.detail_bands.iter() {
         out_signal = upsample(&out_signal, detail, wavelet);
