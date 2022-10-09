@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{cmp::Ordering, error::Error};
 
 use clap::{command, Parser, ValueEnum};
 use markov_music::{
@@ -9,6 +9,7 @@ use markov_music::{
         WaveletType,
     },
 };
+use rand::seq::SliceRandom;
 
 mod util;
 
@@ -147,6 +148,36 @@ impl QuantizedHeirarchy {
         }
     }
 
+    fn with_tokens(&self, tokens: &[WaveletToken]) -> QuantizedHeirarchy {
+        let num_layers = self.levels();
+
+        let (approx_signal, detail_signals) = tokens.iter().fold(
+            (vec![], vec![vec![]; num_layers]),
+            |(mut approx_signal, mut detail_signals), token| {
+                approx_signal.push(*token.approx_sample);
+
+                assert!(token.detail_samples.len() == num_layers);
+                for (detail_samples, detail_signal) in
+                    token.detail_samples.iter().zip(detail_signals.iter_mut())
+                {
+                    detail_signal.extend_from_slice(*detail_samples);
+                }
+
+                (approx_signal, detail_signals)
+            },
+        );
+
+        let approx_band = self.approx_band.with_signal(approx_signal);
+        let detail_bands = self
+            .detail_bands
+            .iter()
+            .zip(detail_signals)
+            .map(|(band, signal)| band.with_signal(signal))
+            .collect();
+
+        QuantizedHeirarchy::new(approx_band, detail_bands, self.quantization_level)
+    }
+
     fn levels(&self) -> usize {
         self.detail_bands.len()
     }
@@ -171,15 +202,47 @@ impl QuantizedHeirarchy {
     }
 }
 
-#[derive(Debug, Clone, Eq)]
+#[derive(Debug, Clone, Eq, Ord)]
 struct WaveletToken<'a> {
     approx_sample: &'a QuantizedSample,
     detail_samples: Vec<&'a [QuantizedSample]>,
 }
 
+impl<'a> WaveletToken<'a> {
+    fn cmp_list(&self, other: &WaveletToken) -> Vec<Ordering> {
+        let mut list = vec![];
+        assert!(self.detail_samples.len() == other.detail_samples.len());
+        for (this, other) in self
+            .detail_samples
+            .iter()
+            .zip(other.detail_samples.iter())
+            .rev()
+        {
+            list.push(this[0].abs().cmp(&other[0].abs()));
+        }
+        list.push(self.approx_sample.abs().cmp(&other.approx_sample.abs()));
+        list
+    }
+}
+
 impl PartialEq for WaveletToken<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.approx_sample == other.approx_sample // && self.detail_samples == other.detail_samples
+        self.cmp_list(other)
+            .iter()
+            .all(|cmp| *cmp == Ordering::Equal)
+    }
+}
+
+impl PartialOrd for WaveletToken<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        // self.approx_sample.partial_cmp(&other.approx_sample)
+        let cmp = self
+            .cmp_list(other)
+            .iter()
+            .find(|result| **result != Ordering::Equal)
+            .copied()
+            .unwrap_or(Ordering::Equal);
+        Some(cmp)
     }
 }
 
@@ -272,7 +335,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 samples
                     .iter()
                     .chain(additional_samples.iter().flatten())
-                    .cloned()
                     .map(|x| (x * i16::MAX as Sample * 0.5) as i16)
                     .collect()
             } else {
@@ -424,6 +486,9 @@ fn generate_markov_2(
     length: usize,
 ) -> QuantizedHeirarchy {
     let tokens = wavelets.tokenize();
+    // tokens.shuffle(&mut rand::thread_rng());
+    // tokens.sort();
+
     println!(
         "Training Markov chain of order {:?} (total samples: {})",
         order,
@@ -442,30 +507,6 @@ fn generate_markov_2(
     // (layer 0) is actually half the length of the input audio. Therefore, we need to add one
     // to the exponent when dividing by 2^n in order to account for this.
     let length = length / 2usize.pow(num_layers as u32);
-    let tokens = chain.iter_from_start().take(length);
-    let (approx_signal, detail_signals) = tokens.fold(
-        (vec![], vec![vec![]; num_layers]),
-        |(mut approx_signal, mut detail_signals), token| {
-            approx_signal.push(*token.approx_sample);
-
-            assert!(token.detail_samples.len() == detail_signals.len());
-            for (detail_samples, detail_signal) in
-                token.detail_samples.iter().zip(detail_signals.iter_mut())
-            {
-                detail_signal.extend_from_slice(*detail_samples);
-            }
-
-            (approx_signal, detail_signals)
-        },
-    );
-
-    let approx_band = wavelets.approx_band.with_signal(approx_signal);
-    let detail_bands = wavelets
-        .detail_bands
-        .iter()
-        .zip(detail_signals)
-        .map(|(band, signal)| band.with_signal(signal))
-        .collect();
-
-    QuantizedHeirarchy::new(approx_band, detail_bands, wavelets.quantization_level)
+    let tokens: Vec<_> = chain.iter_from_start().take(length).collect();
+    wavelets.with_tokens(&tokens)
 }
