@@ -382,6 +382,99 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+struct MarkovHeirachy2 {
+    approx_chain: Chain<QuantizedSample>,
+    detail_chains: Vec<Chain<(QuantizedSample, QuantizedSample)>>,
+}
+
+impl MarkovHeirachy2 {
+    fn train(wavelets: &QuantizedHeirarchy, orders: &[usize]) -> Self {
+        println!(
+            "Training approx chain   ({} samples, order {})",
+            wavelets.approx_band.signal.len(),
+            orders[0]
+        );
+        let approx_chain = Chain::new(&wavelets.approx_band.signal, orders[0]).unwrap();
+        let detail_chains: Vec<_> = wavelets
+            .detail_bands
+            .iter()
+            .enumerate()
+            .map(|(i, detail_band)| {
+                let order = orders[i + 1];
+                println!(
+                    "Training detail chain {} ({} samples, order {})",
+                    i,
+                    detail_band.signal.len(),
+                    order
+                );
+
+                let this_band = &detail_band.signal;
+                let other_signal: Vec<QuantizedSample> = if i == 0 {
+                    // The 0th detail band is the same size as the approx band
+                    wavelets.approx_band.signal.iter().cloned().collect()
+                } else {
+                    // The prior band is half as long as this detail band, so we duplicate each
+                    // element to compensate.
+                    wavelets.detail_bands[i - 1]
+                        .signal
+                        .iter()
+                        .flat_map(|x| [x, x].into_iter())
+                        .cloned()
+                        .collect()
+                };
+                assert!(this_band.len() == other_signal.len());
+                let combined: Vec<(i32, i32)> = this_band
+                    .into_iter()
+                    .zip(other_signal.iter())
+                    .map(|(a, b)| (*a, *b))
+                    .collect();
+
+                Chain::new(&combined, order).unwrap()
+            })
+            .collect();
+
+        print_statistics(&approx_chain);
+        detail_chains.iter().for_each(print_statistics);
+
+        Self {
+            approx_chain,
+            detail_chains,
+        }
+    }
+
+    fn generate(&self, length: usize) -> (Vec<Vec<QuantizedSample>>, Vec<QuantizedSample>) {
+        let num_layers = self.detail_chains.len();
+        let length = nearest_power_of_two(length, num_layers);
+
+        // Note that these divisions of length are actually one more than you would expect from zero
+        // indexing. This is because each layer is half of the prior signal. Hence, the first layer
+        // (layer 0) is actually half the length of the input audio. Therefore, we need to add one
+        // to the exponent when dividing by 2^n in order to account for this.
+        let length = length / 2usize.pow(num_layers as u32);
+
+        let detail_signals = self
+            .detail_chains
+            .iter()
+            .enumerate()
+            .map(|(i, chain)| {
+                chain
+                    .iter_from_start()
+                    .take(length * 2usize.pow(i as u32))
+                    .map(|(a, _)| a)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let approx_signal = self
+            .approx_chain
+            .iter_from_start()
+            .take(length)
+            .collect::<Vec<_>>();
+
+        (detail_signals, approx_signal)
+    }
+}
+
 struct MarkovHeirachy {
     approx_chain: Chain<QuantizedSample>,
     detail_chains: Vec<Chain<QuantizedSample>>,
