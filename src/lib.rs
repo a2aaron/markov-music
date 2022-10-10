@@ -5,6 +5,7 @@
 pub mod chaos;
 pub mod markov;
 pub mod midi;
+pub mod neural;
 pub mod notes;
 pub mod quantize;
 pub mod wavelet;
