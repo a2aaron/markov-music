@@ -251,7 +251,6 @@ impl PartialEq for WaveletToken<'_> {
 
 impl PartialOrd for WaveletToken<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // self.approx_sample.partial_cmp(&other.approx_sample)
         let cmp = self
             .cmp_list(other)
             .iter()

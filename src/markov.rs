@@ -135,15 +135,12 @@ pub fn split_into_windows<T>(data: &[T], window_size: usize) -> impl Iterator<It
 
 pub fn print_statistics<T: Chainable>(chain: &Chain<T>) {
     let (total_states, total_choices, deterministic_states, empty_states) = chain.get_stats();
-
     println!(
-        "Order: {}, Total states: {}, empty/deter/other states: {}/{}/{}, average empty/deter/other: {:.2}/{:.2}/{:.2}%, average choices per state: {:.2}",
+        "Order: {}, Total states: {}, deter/other states: {} / {}, average deter/other: {:.2}% / {:.2}%, average choices per state: {:.2}",
         chain.get_order(),
         total_states,
-        empty_states,
         deterministic_states,
         total_states - empty_states - deterministic_states,
-        100.0 * (empty_states as f32 / total_states as f32),
         100.0 * (deterministic_states as f32 / total_states as f32),
         100.0 * ((total_states - empty_states - deterministic_states) as f32 / total_states as f32),
         (total_choices as f32 / total_states as f32),
