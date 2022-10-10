@@ -271,7 +271,11 @@ impl Ord for WaveletToken<'_> {
 
 impl std::hash::Hash for WaveletToken<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.approx_sample.hash(state);
+        let (approx_sample, detail_samples) = self.get_samples();
+        approx_sample.hash(state);
+        for detail_sample in detail_samples {
+            detail_sample.hash(state);
+        }
     }
 }
 
