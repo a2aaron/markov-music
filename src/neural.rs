@@ -63,7 +63,7 @@ impl FullNetwork {
     pub fn backprop(&mut self, eta: f32, inputs: &[f32], expected_output: &[f32]) {
         // First, ask the network what it thinks the answer is.
         // This also makes all the nodes compute their weighted_input
-        let result = self.compute(inputs);
+        let _ = self.compute(inputs);
         // println!("Initial result: {:?}", result);
 
         // Now calculate the output error of the last layer
