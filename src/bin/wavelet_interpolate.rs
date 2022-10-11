@@ -30,6 +30,8 @@ struct Args {
     /// Enable debug mode.
     #[arg(long)]
     debug: bool,
+    #[arg(long, default_value_t = 2)]
+    factor: usize,
 }
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
@@ -39,14 +41,23 @@ enum Channel {
     Both,
 }
 
-fn average(a: &WaveletToken, b: &WaveletToken) -> WaveletToken {
+fn lerp_token(a: &WaveletToken, b: &WaveletToken, t: f64) -> WaveletToken {
+    fn lerp(a: f64, b: f64, t: f64) -> f64 {
+        a + (b - a) * t
+    }
+
     assert!(a.levels() == b.levels());
     let approx_sample = (a.approx_sample + b.approx_sample) / 2.0;
     let detail_samples = a
         .detail_samples
         .iter()
         .zip(b.detail_samples.iter())
-        .map(|(a, b)| a.iter().zip(b.iter()).map(|(a, b)| (a + b) / 2.0).collect())
+        .map(|(a, b)| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(a, b)| lerp(*a, *b, t))
+                .collect()
+        })
         .collect();
 
     WaveletToken {
@@ -55,15 +66,19 @@ fn average(a: &WaveletToken, b: &WaveletToken) -> WaveletToken {
     }
 }
 
-fn interpolate(tokens: &[WaveletToken]) -> Vec<WaveletToken> {
+fn interpolate(tokens: &[WaveletToken], factor: usize) -> Vec<WaveletToken> {
     let mut out_tokens = vec![];
     for i in 0..tokens.len() - 1 {
         let this = &tokens[i];
         let next = &tokens[i + 1];
 
         out_tokens.push(this.clone());
-        let avg = average(this, next);
-        out_tokens.push(avg);
+
+        for j in 0..(factor - 1) {
+            let t = (j + 1) as f64 / (factor as f64);
+            let avg = lerp_token(this, next, t);
+            out_tokens.push(avg);
+        }
     }
 
     out_tokens.push(tokens.last().unwrap().clone());
@@ -97,7 +112,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let wavelets = wavelet_transform(&orig_samples, args.levels, args.wavelet);
             let tokens = wavelets.tokenize();
-            let tokens = interpolate(&tokens);
+            let tokens = interpolate(&tokens, args.factor);
 
             let wavelets = WaveletHeirarchy::from_tokens(&tokens, args.wavelet);
 
@@ -109,12 +124,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 samples
                     .iter()
                     .chain(additional_samples.iter().flatten())
-                    .map(|x| (x * i16::MAX as Sample * 0.5) as i16)
+                    .map(|x| (x * i16::MAX as Sample) as i16)
                     .collect()
             } else {
                 samples
                     .iter()
-                    .map(|x| (x * i16::MAX as Sample * 0.5) as i16)
+                    .map(|x| (x * i16::MAX as Sample) as i16)
                     .collect()
             }
         })
