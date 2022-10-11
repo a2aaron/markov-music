@@ -216,10 +216,12 @@ pub struct WaveletHeirarchy {
     pub detail_bands: Vec<Signal>,
     // The approximation band. This must be the same length as detail_bands[0]
     pub approx_band: Signal,
+    // The WaveletType associated with the signals
+    pub wave_type: WaveletType,
 }
 
 impl WaveletHeirarchy {
-    pub fn from_tokens(tokens: &[WaveletToken]) -> WaveletHeirarchy {
+    pub fn from_tokens(tokens: &[WaveletToken], wavelet_type: WaveletType) -> WaveletHeirarchy {
         let num_levels = tokens[0].levels();
         let (approx_band, detail_bands) = tokens.iter().fold(
             (vec![], vec![vec![]; num_levels]),
@@ -237,7 +239,7 @@ impl WaveletHeirarchy {
             },
         );
 
-        WaveletHeirarchy::new(approx_band, detail_bands)
+        WaveletHeirarchy::new(approx_band, detail_bands, wavelet_type)
     }
 
     pub fn tokenize(&self) -> Vec<WaveletToken> {
@@ -261,7 +263,11 @@ impl WaveletHeirarchy {
 }
 
 impl WaveletHeirarchy {
-    pub fn new(approx_band: Signal, detail_bands: Vec<Signal>) -> WaveletHeirarchy {
+    pub fn new(
+        approx_band: Signal,
+        detail_bands: Vec<Signal>,
+        wavelet_type: WaveletType,
+    ) -> WaveletHeirarchy {
         assert!(approx_band.len() == detail_bands[0].len());
         for i in 0..(detail_bands.len() - 1) {
             assert!(detail_bands[i].len() * 2 == detail_bands[i + 1].len());
@@ -269,6 +275,7 @@ impl WaveletHeirarchy {
         WaveletHeirarchy {
             detail_bands,
             approx_band,
+            wave_type: wavelet_type,
         }
     }
 
@@ -315,7 +322,7 @@ pub fn wavelet_transform(
 
     detail_bands.reverse();
 
-    WaveletHeirarchy::new(signal, detail_bands)
+    WaveletHeirarchy::new(signal, detail_bands, wavelet)
 }
 
 fn upsample(approx: &Signal, detail: &Signal, wavelet: WaveletType) -> Signal {
@@ -336,21 +343,21 @@ fn upsample(approx: &Signal, detail: &Signal, wavelet: WaveletType) -> Signal {
     interleave
 }
 
-pub fn wavelet_untransform(wavelets: &WaveletHeirarchy, wavelet: WaveletType) -> Signal {
+pub fn wavelet_untransform(wavelets: &WaveletHeirarchy) -> Signal {
     let mut out_signal = wavelets.approx_band.clone();
     for detail in wavelets.detail_bands.iter() {
-        out_signal = upsample(&out_signal, detail, wavelet);
+        out_signal = upsample(&out_signal, detail, wavelets.wave_type);
     }
     out_signal
 }
 
-pub fn solo_bands(wavelets: &WaveletHeirarchy, wavelet: WaveletType) -> Vec<Signal> {
+pub fn solo_bands(wavelets: &WaveletHeirarchy) -> Vec<Signal> {
     let mut additional_samples = vec![];
 
     {
         let mut wavelets = wavelets.clone();
         wavelets.detail_bands.iter_mut().for_each(|x| x.fill(0.0));
-        let samples = wavelet_untransform(&wavelets, wavelet);
+        let samples = wavelet_untransform(&wavelets);
         additional_samples.push(samples);
     }
     for i in 0..wavelets.levels() {
@@ -361,7 +368,7 @@ pub fn solo_bands(wavelets: &WaveletHeirarchy, wavelet: WaveletType) -> Vec<Sign
                 wavelets.detail_bands[j].fill(0.0);
             }
         }
-        let samples = wavelet_untransform(&wavelets, wavelet);
+        let samples = wavelet_untransform(&wavelets);
         additional_samples.push(samples);
     }
 

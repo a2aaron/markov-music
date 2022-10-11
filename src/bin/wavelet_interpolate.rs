@@ -99,13 +99,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             let tokens = wavelets.tokenize();
             let tokens = interpolate(&tokens);
 
-            let wavelets = WaveletHeirarchy::from_tokens(&tokens);
+            let wavelets = WaveletHeirarchy::from_tokens(&tokens, args.wavelet);
 
-            let samples = wavelet_untransform(&wavelets, args.wavelet);
+            let samples = wavelet_untransform(&wavelets);
 
             if args.debug {
                 println!("Generating solo-band samples...");
-                let additional_samples = solo_bands(&wavelets, args.wavelet);
+                let additional_samples = solo_bands(&wavelets);
                 samples
                     .iter()
                     .chain(additional_samples.iter().flatten())

@@ -77,7 +77,7 @@ fn compress(wavelet: WaveletType, quantization: &[usize], samples: &mut [i16]) {
     for (&quant, detail) in quantization[1..].iter().zip(detail.iter_mut().rev()) {
         quantize(quant, detail);
     }
-    let float_samples = wavelet::wavelet_untransform(&wavelets, wavelet);
+    let float_samples = wavelet::wavelet_untransform(&wavelets);
     for (out_sample, x) in samples.iter_mut().zip(float_samples) {
         *out_sample = (x * i16::MAX as Sample) as i16;
     }

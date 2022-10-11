@@ -110,6 +110,7 @@ struct QuantizedHeirarchy {
     approx_band: QuantizedBand,
     detail_bands: Vec<QuantizedBand>,
     quantization_level: u32,
+    wavelet_type: WaveletType,
 }
 
 impl QuantizedHeirarchy {
@@ -120,7 +121,12 @@ impl QuantizedHeirarchy {
             .iter()
             .map(|band| QuantizedBand::quantize(&band, quantization_level))
             .collect();
-        QuantizedHeirarchy::new(approx_band, detail_bands, quantization_level)
+        QuantizedHeirarchy::new(
+            approx_band,
+            detail_bands,
+            quantization_level,
+            wavelets.wave_type,
+        )
     }
 
     fn unquantize(&self) -> WaveletHeirarchy {
@@ -130,13 +136,14 @@ impl QuantizedHeirarchy {
             .iter()
             .map(|band| QuantizedBand::unquantize(&band, self.quantization_level))
             .collect();
-        WaveletHeirarchy::new(approx_band, detail_bands)
+        WaveletHeirarchy::new(approx_band, detail_bands, self.wavelet_type)
     }
 
     fn new(
         approx_band: QuantizedBand,
         detail_bands: Vec<QuantizedBand>,
         quantization_level: u32,
+        wavelet_type: WaveletType,
     ) -> QuantizedHeirarchy {
         assert!(approx_band.len() == detail_bands[0].len());
         for i in 0..(detail_bands.len() - 1) {
@@ -146,6 +153,7 @@ impl QuantizedHeirarchy {
             detail_bands,
             approx_band,
             quantization_level,
+            wavelet_type,
         }
     }
 
@@ -177,7 +185,12 @@ impl QuantizedHeirarchy {
             .map(|(band, signal)| band.with_signal(signal))
             .collect();
 
-        QuantizedHeirarchy::new(approx_band, detail_bands, self.quantization_level)
+        QuantizedHeirarchy::new(
+            approx_band,
+            detail_bands,
+            self.quantization_level,
+            self.wavelet_type,
+        )
     }
 
     fn levels(&self) -> usize {
@@ -332,11 +345,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
             let wavelets = wavelets.unquantize();
 
-            let samples = wavelet_untransform(&wavelets, args.wavelet);
+            let samples = wavelet_untransform(&wavelets);
 
             if args.debug {
                 println!("Generating solo-band samples...");
-                let additional_samples = solo_bands(&wavelets, args.wavelet);
+                let additional_samples = solo_bands(&wavelets);
                 samples
                     .iter()
                     .chain(additional_samples.iter().flatten())
@@ -562,7 +575,12 @@ fn generate_markov(
 
     let approx_band = wavelets.approx_band.with_signal(approx_signal);
 
-    QuantizedHeirarchy::new(approx_band, detail_bands, wavelets.quantization_level)
+    QuantizedHeirarchy::new(
+        approx_band,
+        detail_bands,
+        wavelets.quantization_level,
+        wavelets.wavelet_type,
+    )
 }
 
 fn generate_markov_2(
