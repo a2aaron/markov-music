@@ -196,6 +196,18 @@ pub fn nearest_power_of_two(x: usize, power_of_two: usize) -> usize {
 }
 
 #[derive(Debug, Clone)]
+pub struct WaveletToken {
+    pub approx_sample: Sample,
+    pub detail_samples: Vec<Vec<Sample>>,
+}
+
+impl WaveletToken {
+    pub fn levels(&self) -> usize {
+        self.detail_samples.len()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct WaveletHeirarchy {
     // The detail bands. This is stored such that detail_bands[0] is the shortest band while
     // detail_bands[n - 1] is the longest band (this means that they are stored in the opposite
@@ -204,6 +216,48 @@ pub struct WaveletHeirarchy {
     pub detail_bands: Vec<Signal>,
     // The approximation band. This must be the same length as detail_bands[0]
     pub approx_band: Signal,
+}
+
+impl WaveletHeirarchy {
+    pub fn from_tokens(tokens: &[WaveletToken]) -> WaveletHeirarchy {
+        let num_levels = tokens[0].levels();
+        let (approx_band, detail_bands) = tokens.iter().fold(
+            (vec![], vec![vec![]; num_levels]),
+            |(mut approx_band, mut detail_bands), token| {
+                approx_band.push(token.approx_sample);
+
+                assert!(token.levels() == detail_bands.len());
+                for (detail_samples, detail_band) in
+                    token.detail_samples.iter().zip(detail_bands.iter_mut())
+                {
+                    detail_band.extend_from_slice(detail_samples);
+                }
+
+                (approx_band, detail_bands)
+            },
+        );
+
+        WaveletHeirarchy::new(approx_band, detail_bands)
+    }
+
+    pub fn tokenize(&self) -> Vec<WaveletToken> {
+        let mut tokens = vec![];
+        for i in 0..self.approx_band.len() {
+            let approx_sample = self.approx_band[i];
+            let mut detail_samples = vec![];
+            for j in 0..self.detail_bands.len() {
+                let window = 2usize.pow(j as u32);
+                let lower = i * window;
+                let upper = (i + 1) * window;
+                detail_samples.push(self.detail_bands[j][lower..upper].to_vec());
+            }
+            tokens.push(WaveletToken {
+                approx_sample,
+                detail_samples,
+            });
+        }
+        tokens
+    }
 }
 
 impl WaveletHeirarchy {
