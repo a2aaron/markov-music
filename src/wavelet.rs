@@ -343,3 +343,27 @@ pub fn wavelet_untransform(wavelets: &WaveletHeirarchy, wavelet: WaveletType) ->
     }
     out_signal
 }
+
+pub fn solo_bands(wavelets: &WaveletHeirarchy, wavelet: WaveletType) -> Vec<Signal> {
+    let mut additional_samples = vec![];
+
+    {
+        let mut wavelets = wavelets.clone();
+        wavelets.detail_bands.iter_mut().for_each(|x| x.fill(0.0));
+        let samples = wavelet_untransform(&wavelets, wavelet);
+        additional_samples.push(samples);
+    }
+    for i in 0..wavelets.levels() {
+        let mut wavelets = wavelets.clone();
+        wavelets.approx_band.fill(0.0);
+        for j in 0..wavelets.levels() {
+            if i != j {
+                wavelets.detail_bands[j].fill(0.0);
+            }
+        }
+        let samples = wavelet_untransform(&wavelets, wavelet);
+        additional_samples.push(samples);
+    }
+
+    additional_samples
+}

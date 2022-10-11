@@ -2,7 +2,8 @@ use std::error::Error;
 
 use clap::{command, Parser, ValueEnum};
 use markov_music::wavelet::{
-    wavelet_transform, wavelet_untransform, Sample, WaveletHeirarchy, WaveletToken, WaveletType,
+    solo_bands, wavelet_transform, wavelet_untransform, Sample, WaveletHeirarchy, WaveletToken,
+    WaveletType,
 };
 
 mod util;
@@ -104,28 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             if args.debug {
                 println!("Generating solo-band samples...");
-                let mut additional_samples = vec![];
-
-                {
-                    let mut wavelets = wavelets.clone();
-                    wavelets.detail_bands.iter_mut().for_each(|x| x.fill(0.0));
-                    println!("Generating solo-band for approx band");
-                    let samples = wavelet_untransform(&wavelets, args.wavelet);
-                    additional_samples.push(samples);
-                }
-                for i in 0..wavelets.levels() {
-                    let mut wavelets = wavelets.clone();
-                    wavelets.approx_band.fill(0.0);
-                    for j in 0..wavelets.levels() {
-                        if i != j {
-                            wavelets.detail_bands[j].fill(0.0);
-                        }
-                    }
-                    println!("Generating solo-band for detail band {}", i);
-                    let samples = wavelet_untransform(&wavelets, args.wavelet);
-                    additional_samples.push(samples);
-                }
-
+                let additional_samples = solo_bands(&wavelets, args.wavelet);
                 samples
                     .iter()
                     .chain(additional_samples.iter().flatten())
