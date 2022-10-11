@@ -4,6 +4,8 @@ use std::{collections::HashMap, error::Error};
 use rand::seq::IteratorRandom;
 use rand::{thread_rng, Rng};
 
+use crate::split_into_windows;
+
 /// The definition of all types that can be used in a `Chain`.
 pub trait Chainable: Eq + Hash + Clone + std::fmt::Debug {}
 impl<T> Chainable for T where T: Eq + Hash + Clone + std::fmt::Debug {}
@@ -127,10 +129,6 @@ impl<'a, T: Chainable> Iterator for InfiniteIterator<'a, T> {
             }
         }
     }
-}
-
-pub fn split_into_windows<T>(data: &[T], window_size: usize) -> impl Iterator<Item = &[T]> {
-    (0..(data.len() - window_size)).map(move |i| &data[i..i + window_size])
 }
 
 pub fn print_statistics<T: Chainable>(chain: &Chain<T>) {
