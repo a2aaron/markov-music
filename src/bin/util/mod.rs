@@ -2,6 +2,43 @@ use minimp3::Decoder;
 use std::{error::Error, io::Read, path::Path};
 use wav::WAV_FORMAT_PCM;
 
+pub fn read_file(
+    path: impl AsRef<Path>,
+) -> Result<(Vec<i16>, Option<Vec<i16>>, usize), Box<dyn Error>> {
+    if let Ok(mp3_data) = read_mp3_file(&path) {
+        Ok(mp3_data)
+    } else {
+        read_wav_file(path)
+    }
+}
+
+pub fn read_wav_file(
+    path: impl AsRef<Path>,
+) -> Result<(Vec<i16>, Option<Vec<i16>>, usize), Box<dyn Error>> {
+    let mut file = std::fs::File::open(path)?;
+    let (header, bit_depth) = wav::read(&mut file)?;
+    let data = match bit_depth {
+        wav::BitDepth::Eight(_samples) => todo!(),
+        wav::BitDepth::Sixteen(samples) => samples,
+        wav::BitDepth::TwentyFour(_samples) => todo!(),
+        wav::BitDepth::ThirtyTwoFloat(_samples) => todo!(),
+        wav::BitDepth::Empty => todo!(),
+    };
+    let sample_rate = header.sampling_rate as usize;
+    if header.channel_count == 1 {
+        Ok((data, None, sample_rate))
+    } else if header.channel_count == 2 {
+        let (left, right) = split_channels(&data);
+        Ok((left, Some(right), sample_rate))
+    } else {
+        Err(format!(
+            "Expected channel count to equal 1 or 2, got {}",
+            header.channel_count
+        )
+        .into())
+    }
+}
+
 pub fn read_mp3_file(
     path: impl AsRef<Path>,
 ) -> Result<(Vec<i16>, Option<Vec<i16>>, usize), Box<dyn Error>> {

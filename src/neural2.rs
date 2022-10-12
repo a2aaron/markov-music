@@ -1,13 +1,21 @@
 use dfdx::{
-    prelude::{mse_loss, Linear, Module, Momentum, Optimizer, ResetParams, Sgd, SgdConfig, Tanh},
+    prelude::{mse_loss, Adam, AdamConfig, Linear, Module, Optimizer, ResetParams, Tanh},
     tensor::{HasArrayData, Tensor1D, TensorCreator},
 };
 
-type Model = (Linear<2, 3>, Tanh, Linear<3, 3>, Linear<3, 1>);
+pub const IN_WINDOW_SIZE: usize = 128;
+pub const OUT_WINDOW_SIZE: usize = 128;
+type Model = (
+    (Linear<IN_WINDOW_SIZE, IN_WINDOW_SIZE>, Tanh),
+    (Linear<IN_WINDOW_SIZE, 512>, Tanh),
+    (Linear<512, 256>, Tanh),
+    (Linear<256, 512>, Tanh),
+    (Linear<512, OUT_WINDOW_SIZE>, Tanh),
+);
 
 pub struct NeuralNet {
     model: Model,
-    sgd: Sgd<Model>,
+    optim: Adam<Model>,
 }
 
 impl NeuralNet {
@@ -15,48 +23,34 @@ impl NeuralNet {
         let mut model = Model::default();
         model.reset_params(&mut rand::thread_rng());
 
-        let sgd = Sgd::new(SgdConfig {
-            lr: 1e-1,
-            momentum: Some(Momentum::Nesterov(0.5)),
+        let optim = Adam::new(AdamConfig {
+            lr: 1e-5,
+            betas: [0.9, 0.999],
+            eps: 1e-8,
         });
-        NeuralNet { model, sgd }
+        NeuralNet { model, optim }
     }
 
-    pub fn reset(&mut self) {
-        self.model.reset_params(&mut rand::thread_rng());
-        self.sgd = Sgd::new(SgdConfig {
-            lr: 1e-2,
-            momentum: None,
-        });
-    }
-
-    pub fn compute(&self, input: [f32; 2]) -> f32 {
+    pub fn compute(&self, input: [f32; IN_WINDOW_SIZE]) -> Vec<f32> {
         let input = Tensor1D::new(input);
         let pred = self.model.forward(input);
-        pred.data()[0]
+        pred.data().to_vec()
     }
 
-    pub fn compute_with_loss(&self, input: [f32; 2], output: f32) -> (f32, f32) {
-        let input = Tensor1D::new(input);
-        let targ = Tensor1D::new([output]);
-        let pred = self.model.forward(input);
-        let out = pred.data()[0];
-
-        let loss = mse_loss(pred, &targ);
-        (out, *loss.data())
-    }
-
-    pub fn train(&mut self, input: [f32; 2], output: f32) {
+    pub fn train(&mut self, input: [f32; IN_WINDOW_SIZE], output: [f32; OUT_WINDOW_SIZE]) -> f32 {
         let input = Tensor1D::new(input).trace();
-        let targ = Tensor1D::new([output]);
+        let targ = Tensor1D::new(output);
 
         let pred = self.model.forward_mut(input);
 
         let loss = mse_loss(pred, &targ);
+        let loss_value = *loss.data();
+
         let gradients = loss.backward();
 
-        self.sgd
+        self.optim
             .update(&mut self.model, gradients)
             .expect("Oops, there were some unused params");
+        loss_value
     }
 }
