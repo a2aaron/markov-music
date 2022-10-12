@@ -3,7 +3,6 @@ use std::error::Error;
 use clap::{command, Parser, ValueEnum};
 use itertools::Itertools;
 use markov_music::distribution::{normalize, unnormalize, Distribution};
-use rand::Rng;
 
 mod util;
 
@@ -95,12 +94,4 @@ fn main() -> Result<(), Box<dyn Error>> {
         samples.get(1).map(Vec::as_ref),
     )?;
     Ok(())
-}
-
-fn random_vector(length: usize) -> Vec<f32> {
-    let mut vec = Vec::with_capacity(length);
-    for _ in 0..length {
-        vec.push(rand::thread_rng().gen_range(0.0..1.0))
-    }
-    vec
 }

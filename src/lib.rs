@@ -6,7 +6,6 @@ pub mod chaos;
 pub mod distribution;
 pub mod markov;
 pub mod midi;
-pub mod neural;
 pub mod neural2;
 pub mod notes;
 pub mod quantize;
