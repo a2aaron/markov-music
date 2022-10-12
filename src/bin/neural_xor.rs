@@ -1,53 +1,38 @@
-use markov_music::neural;
+use markov_music::neural2::NeuralNet;
 use pixel_canvas::{Canvas, Color};
+use rand::{seq::SliceRandom, thread_rng};
 
 fn main() {
-    let network = neural::FullNetwork::with_size(2, &[2, 1]);
-    println!("Initial Network: {:#?}", network);
+    let network = NeuralNet::new();
 
-    let canvas = Canvas::new(256, 256).state((network, 0)).show_ms(true);
+    let canvas = Canvas::new(256, 256).state((network, 0usize)).show_ms(true);
     canvas.render(|(network, i), image| {
-        if *i % 100_000 == 0 {
-            *network = neural::FullNetwork::with_size(2, &[2, 1]);
+        let oracle = [
+            ([0.0, 0.0], 0.0),
+            ([0.0, 1.0], 1.0),
+            ([1.0, 0.0], 1.0),
+            ([1.0, 1.0], 0.0),
+        ];
+
+        *i += 1;
+        for _ in 0..100 {
+            let (inputs, outputs) = oracle.choose(&mut thread_rng()).unwrap();
+            network.train(*inputs, *outputs);
         }
-        for _ in 0..1_000 {
-            *i += 1;
-            let oracle = [
-                (vec![0.0, 0.0], vec![0.0]),
-                (vec![0.0, 1.0], vec![1.0]),
-                (vec![1.0, 0.0], vec![1.0]),
-                (vec![1.0, 1.0], vec![0.0]),
-            ];
-            let (i, _) = oracle.iter().enumerate().fold(
-                (0, 0.0),
-                |(max_i, max_cost), (i, (inputs, outputs))| {
-                    let cost = network.cost(inputs, outputs);
-                    if max_cost > cost {
-                        (max_i, max_cost)
-                    } else {
-                        (i, cost)
-                    }
-                },
-            );
-            let (inputs, outputs) = &oracle[i];
-            network.backprop(1.0, &inputs, &outputs);
+
+        let mut total_loss = 0.0;
+        for (input, output) in oracle {
+            let (_, loss) = network.compute_with_loss(input, output);
+            total_loss += loss;
         }
-        if *i % 100_000 == 0 {
-            println!("i = {}", i);
-            println!(
-                "Costs: {:>6.04}  {:>6.04}  {:>6.04}  {:>6.04}",
-                network.cost(&[0.0, 0.0], &[0.0]),
-                network.cost(&[0.0, 1.0], &[1.0]),
-                network.cost(&[1.0, 0.0], &[1.0]),
-                network.cost(&[1.0, 1.0], &[0.0]),
-            );
-            println!(
-                "Output: {:>6.04}  {:>6.04}  {:>6.04}  {:>6.04}",
-                network.compute(&[0.0, 0.0])[0],
-                network.compute(&[0.0, 1.0])[0],
-                network.compute(&[1.0, 0.0])[0],
-                network.compute(&[1.0, 1.0])[0],
-            );
+
+        if *i % 10 == 0 {
+            println!("total_loss: {}", total_loss / 4.0);
+        }
+
+        if total_loss < 0.00001 {
+            println!("Reset!");
+            network.reset();
         }
 
         image.fill(Color::BLACK);
@@ -57,9 +42,12 @@ fn main() {
             for (x, pixel) in row.iter_mut().enumerate() {
                 let x_float = ((x as f32 / width as f32) - 0.5) * 3.0;
                 let y_float = ((y as f32 / height as f32) - 0.5) * 3.0;
-                let output = network.compute(&[x_float, y_float]);
+                let output = network.compute([x_float, y_float]);
                 *pixel = Color {
-                    r: (output[0].clamp(0.0, 1.0) * 250.0) as u8, // if output[0] > 0.5 { 255 } else { 0 },
+                    r: {
+                        let amt = (4.0 * output - 2.0).tanh() / 2.0 + 0.5;
+                        (amt * 250.0) as u8
+                    },
                     g: if (x_float - 1.0).abs() < 0.01 || (y_float - 1.0).abs() < 0.01 {
                         255
                     } else {
