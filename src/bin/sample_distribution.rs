@@ -64,17 +64,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             let (channel, min, max) = normalize(&channel);
 
             // let length = args.length * sample_rate;
-            let length = 1000;
+            let length = 5000;
             println!("Constructing distribution...");
             let distribution = Distribution::new(&channel, args.order);
 
             println!("Generating {} samples...", length);
 
-            let mut out_samples = Vec::with_capacity(length);
-            let mut window = random_vector(args.order);
+            let mut window = channel[4000..4000 + args.order].to_vec(); // random_vector(args.order);
+            let mut out_samples = window.clone();
             for i in 0..length {
                 let (error, next) = distribution.next_sample(&window);
-                if i % 100 == 0 {
+                if i % 300 == 0 {
                     println!("{} / {}, next: {}, error: {}", i, length, next, error);
                 }
                 out_samples.push(next);
