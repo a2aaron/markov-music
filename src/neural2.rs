@@ -1,56 +1,57 @@
-use dfdx::{
-    prelude::{mse_loss, Adam, AdamConfig, Linear, Module, Optimizer, ResetParams, Tanh},
-    tensor::{HasArrayData, Tensor1D, TensorCreator},
+use tch::{
+    nn::{self, LinearConfig, Module, OptimizerConfig, VarStore},
+    Tensor,
 };
 
 pub const IN_WINDOW_SIZE: usize = 128;
 pub const OUT_WINDOW_SIZE: usize = 128;
-type Model = (
-    (Linear<IN_WINDOW_SIZE, IN_WINDOW_SIZE>, Tanh),
-    (Linear<IN_WINDOW_SIZE, 512>, Tanh),
-    (Linear<512, 256>, Tanh),
-    (Linear<256, 512>, Tanh),
-    (Linear<512, OUT_WINDOW_SIZE>, Tanh),
-);
 
 pub struct NeuralNet {
-    model: Model,
-    optim: Adam<Model>,
+    model: Box<dyn Module>,
+    optim: nn::Optimizer,
 }
 
 impl NeuralNet {
-    pub fn new() -> NeuralNet {
-        let mut model = Model::default();
-        model.reset_params(&mut rand::thread_rng());
-
-        let optim = Adam::new(AdamConfig {
-            lr: 1e-5,
-            betas: [0.9, 0.999],
-            eps: 1e-8,
-        });
-        NeuralNet { model, optim }
+    pub fn new(vs: &VarStore) -> NeuralNet {
+        let model = nn::seq()
+            .add(linear(vs, IN_WINDOW_SIZE, 128))
+            .add_fn(|xs| xs.relu())
+            .add(linear(vs, 128, 128))
+            .add_fn(|xs| xs.relu())
+            .add(linear(vs, 128, OUT_WINDOW_SIZE));
+        println!("{:?}", model);
+        let optim = nn::AdamW::default().build(vs, 0.01).unwrap();
+        NeuralNet {
+            model: Box::new(model),
+            optim,
+        }
     }
 
     pub fn compute(&self, input: [f32; IN_WINDOW_SIZE]) -> Vec<f32> {
-        let input = Tensor1D::new(input);
-        let pred = self.model.forward(input);
-        pred.data().to_vec()
+        let input = Tensor::of_slice(&input);
+        let pred = self.model.forward(&input);
+        pred.into()
     }
 
     pub fn train(&mut self, input: [f32; IN_WINDOW_SIZE], output: [f32; OUT_WINDOW_SIZE]) -> f32 {
-        let input = Tensor1D::new(input).trace();
-        let targ = Tensor1D::new(output);
+        let input = Tensor::of_slice(&input);
+        let targ = Tensor::of_slice(&output);
 
-        let pred = self.model.forward_mut(input);
+        let pred = self.model.forward(&input);
 
-        let loss = mse_loss(pred, &targ);
-        let loss_value = *loss.data();
+        let loss = pred.mse_loss(&targ, tch::Reduction::Mean);
+        let loss_value = loss.data().into();
 
-        let gradients = loss.backward();
-
-        self.optim
-            .update(&mut self.model, gradients)
-            .expect("Oops, there were some unused params");
+        self.optim.backward_step_clip(&loss, 0.5);
         loss_value
     }
+}
+
+fn linear(vs: &VarStore, in_dim: usize, out_dim: usize) -> nn::Linear {
+    nn::linear(
+        &vs.root(),
+        in_dim as i64,
+        out_dim as i64,
+        LinearConfig::default(),
+    )
 }

@@ -4,6 +4,7 @@ use clap::{command, Parser};
 use itertools::Itertools;
 use markov_music::neural2::{NeuralNet, IN_WINDOW_SIZE, OUT_WINDOW_SIZE};
 use rand::Rng;
+use tch::{nn, Device};
 
 mod util;
 
@@ -74,7 +75,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let length = args.length * sample_rate;
 
     println!("Training neural net...");
-    let mut network = NeuralNet::new();
+    let device = Device::cuda_if_available();
+    let vs = nn::VarStore::new(device);
+
+    let mut network = NeuralNet::new(&vs);
     for epoch_i in 0.. {
         let mut batch_loss = 0.0;
         for _ in 0..args.batch_size {

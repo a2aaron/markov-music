@@ -9,7 +9,6 @@ edition = "2021"
 argmin = "0.7.0"
 clap = { version = "4.0.8", features = ["derive"] }
 derive_more = "0.99.17"
-dfdx = "0.9.0"
 flamegraph = "0.6.2"
 itertools = "0.10.5"
 # Pinned to this commit: https://github.com/a2aaron/midly/commit/62216a6f296d77f10c62008b8dadc02b2804f354
@@ -17,4 +16,5 @@ midly = { git = "https://github.com/a2aaron/midly", rev = "62216a6f296d77f10c620
 minimp3 = "0.5.1"
 rand = "0.8.5"
 rayon = "1.5.3"
+tch = "0.8.0"
 wav = "1.0.0"
