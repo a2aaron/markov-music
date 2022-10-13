@@ -294,7 +294,7 @@ impl std::hash::Hash for WaveletToken<'_> {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    let (left, right, sample_rate) = util::read_mp3_file(&args.in_path)?;
+    let (left, right, sample_rate) = util::read_file(&args.in_path)?;
 
     let channels = if let Some(right) = right {
         match args.channel {

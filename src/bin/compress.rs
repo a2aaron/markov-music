@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     args.quantization
         .extend((0..remaining_levels).map(|_| fill_value));
 
-    let (mut left, mut right, sample_rate) = util::read_mp3_file(&args.in_path)?;
+    let (mut left, mut right, sample_rate) = util::read_file(&args.in_path)?;
 
     compress(args.wavelet, &args.quantization, &mut left);
     if let Some(right) = right.as_mut() {
