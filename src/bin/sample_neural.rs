@@ -27,37 +27,67 @@ struct Args {
     length: usize,
 }
 
-struct NormalizedAudio {
-    audio: Vec<f32>,
+struct Audio {
+    audio: Vec<i64>,
     min: f32,
     max: f32,
+    rounded_min: i64,
 }
 
-impl NormalizedAudio {
-    fn new(input: &[i16]) -> NormalizedAudio {
+impl Audio {
+    fn new(input: &[i16]) -> Audio {
         let max = input.iter().cloned().max().unwrap() as f32;
         let min = input.iter().cloned().min().unwrap() as f32;
+        let scale = (max - min) / 255.0;
         let audio = input
             .iter()
-            .map(|x| (*x as f32 - min) / (max - min))
+            .cloned()
+            .map(|x| {
+                let sample = x as f32 / scale;
+                sample.round() as i64
+            })
             .collect_vec();
-        NormalizedAudio { audio, min, max }
+
+        let rounded_min = *audio.iter().min().unwrap();
+        let audio = audio.iter().cloned().map(|x| x - rounded_min).collect_vec();
+        assert!(
+            *audio.iter().min().unwrap() >= 0i64,
+            "{}",
+            audio.iter().min().unwrap()
+        );
+        assert!(
+            *audio.iter().max().unwrap() < 256i64,
+            "{}",
+            audio.iter().max().unwrap()
+        );
+        assert_eq!((0..256).len(), 256);
+        Audio {
+            audio,
+            min,
+            max,
+            rounded_min,
+        }
     }
 
     fn len(&self) -> usize {
         self.audio.len()
     }
 
-    fn unnormalize(&self, audio: &[f32]) -> Vec<f32> {
+    fn unnormalize(&self, audio: &[i64]) -> Vec<f32> {
+        let scale = (self.max - self.min) / 255.0;
         audio
             .iter()
-            .map(|x| x * (self.max - self.min) + self.min)
+            .cloned()
+            .map(|x| {
+                let sample = (x + self.rounded_min) as f32;
+                sample * scale
+            })
             .collect_vec()
     }
 
-    fn random_example(&self) -> [f32; SEQ_LEN] {
+    fn random_example(&self) -> &[i64] {
         let i = rand::thread_rng().gen_range(0..(self.audio.len() - (SEQ_LEN + 1)));
-        into_window(&self.audio[i..i + SEQ_LEN])
+        &self.audio[i..i + SEQ_LEN]
     }
 }
 
@@ -67,7 +97,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
     let (signal, _, sample_rate) = util::read_file(&args.in_path)?;
-    let signal = NormalizedAudio::new(&signal);
+    let signal = Audio::new(&signal);
     println!("Input samples: {}", signal.len());
 
     let length = sample_rate * args.length;
@@ -76,7 +106,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Training neural net on {:?}", device);
     let vs = nn::VarStore::new(device);
 
-    let mut network = NeuralNet::new(&vs, device);
+    let quantization = 256;
+    let mut network = NeuralNet::new(&vs, device, quantization);
     for epoch_i in 0..args.epochs {
         let mut batch_loss = 0.0;
         for _batch_i in 0..args.batch_size {
@@ -92,21 +123,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             batch_loss / args.batch_size as f32
         );
 
-        if epoch_i != 0 && epoch_i % 10 == 0 {
+        if epoch_i % 10 == 0 {
             generate(epoch_i, sample_rate, length, &network, &signal);
         }
     }
     Ok(())
 }
 
-fn generate(
-    epoch: usize,
-    sample_rate: usize,
-    length: usize,
-    network: &NeuralNet,
-    signal: &NormalizedAudio,
-) {
-    let mut input = 0.0;
+fn generate(epoch: usize, sample_rate: usize, length: usize, network: &NeuralNet, signal: &Audio) {
+    let mut input = 0;
     let mut samples = Vec::with_capacity(length);
     let mut state = network.zero_state();
     println!("Generating {} samples...", length);
@@ -115,20 +140,14 @@ fn generate(
         state = new_state;
         samples.push(next.clone());
         input = next;
+
+        if samples.len() % 10_000 == 0 {
+            println!("Generating... ({:?} / {})", samples.len(), length)
+        }
     }
 
     let samples = signal.unnormalize(&samples);
     let samples = samples.iter().map(|x| *x as i16).collect_vec();
 
     util::write_wav(format!("epoch{}.wav", epoch), sample_rate, &samples, None).unwrap();
-}
-
-fn into_window<const WINDOW_SIZE: usize>(x: &[f32]) -> [f32; WINDOW_SIZE] {
-    assert!(
-        x.len() == WINDOW_SIZE,
-        "Expected slice of len {}, got {}",
-        WINDOW_SIZE,
-        x.len()
-    );
-    x.try_into().unwrap()
 }

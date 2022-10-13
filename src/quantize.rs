@@ -41,7 +41,7 @@ impl QuantizedSignal {
     }
 }
 
-pub type QuantizedSample = i32;
+pub type QuantizedSample = i64;
 
 pub trait Quantizable: Sized {
     fn from_f64(x: f64) -> Self;
