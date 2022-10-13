@@ -3,7 +3,7 @@ use std::{cmp::Ordering, error::Error};
 use clap::{command, Parser, ValueEnum};
 use markov_music::{
     markov::{print_statistics, Chain},
-    quantize::{Quantizable, QuantizedSample},
+    quantize::{QuantizedSample, QuantizedSignal},
     wavelet::{
         nearest_power_of_two, solo_bands, wavelet_transform, wavelet_untransform, Sample,
         WaveletHeirarchy, WaveletType,
@@ -65,61 +65,20 @@ enum Channel {
 }
 
 #[derive(Debug)]
-struct QuantizedBand {
-    signal: Vec<QuantizedSample>,
-    min: f64,
-    max: f64,
-}
-
-impl QuantizedBand {
-    fn quantize(signal: &[Sample], quantization_level: u32) -> QuantizedBand {
-        let min = signal.iter().cloned().reduce(f64::min).unwrap();
-        let max = signal.iter().cloned().reduce(f64::max).unwrap();
-
-        let signal = signal
-            .iter()
-            .map(|sample| Quantizable::quantize(*sample, min, max, quantization_level))
-            .collect();
-        QuantizedBand { signal, min, max }
-    }
-
-    fn unquantize(band: &QuantizedBand, quantization_level: u32) -> Vec<Sample> {
-        band.signal
-            .iter()
-            .map(|quantized| {
-                Quantizable::unquantize(*quantized, band.min, band.max, quantization_level)
-            })
-            .collect()
-    }
-
-    fn with_signal(&self, signal: Vec<QuantizedSample>) -> QuantizedBand {
-        QuantizedBand {
-            signal,
-            min: self.min,
-            max: self.max,
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.signal.len()
-    }
-}
-
-#[derive(Debug)]
 struct QuantizedHeirarchy {
-    approx_band: QuantizedBand,
-    detail_bands: Vec<QuantizedBand>,
+    approx_band: QuantizedSignal,
+    detail_bands: Vec<QuantizedSignal>,
     quantization_level: u32,
     wavelet_type: WaveletType,
 }
 
 impl QuantizedHeirarchy {
     fn quantize(wavelets: &WaveletHeirarchy, quantization_level: u32) -> QuantizedHeirarchy {
-        let approx_band = QuantizedBand::quantize(&wavelets.approx_band, quantization_level);
+        let approx_band = QuantizedSignal::quantize(&wavelets.approx_band, quantization_level);
         let detail_bands = wavelets
             .detail_bands
             .iter()
-            .map(|band| QuantizedBand::quantize(&band, quantization_level))
+            .map(|band| QuantizedSignal::quantize(&band, quantization_level))
             .collect();
         QuantizedHeirarchy::new(
             approx_band,
@@ -130,18 +89,18 @@ impl QuantizedHeirarchy {
     }
 
     fn unquantize(&self) -> WaveletHeirarchy {
-        let approx_band = QuantizedBand::unquantize(&self.approx_band, self.quantization_level);
+        let approx_band = QuantizedSignal::unquantize(&self.approx_band, self.quantization_level);
         let detail_bands = self
             .detail_bands
             .iter()
-            .map(|band| QuantizedBand::unquantize(&band, self.quantization_level))
+            .map(|band| QuantizedSignal::unquantize(&band, self.quantization_level))
             .collect();
         WaveletHeirarchy::new(approx_band, detail_bands, self.wavelet_type)
     }
 
     fn new(
-        approx_band: QuantizedBand,
-        detail_bands: Vec<QuantizedBand>,
+        approx_band: QuantizedSignal,
+        detail_bands: Vec<QuantizedSignal>,
         quantization_level: u32,
         wavelet_type: WaveletType,
     ) -> QuantizedHeirarchy {

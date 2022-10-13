@@ -1,3 +1,46 @@
+use crate::wavelet::Sample;
+
+#[derive(Debug)]
+pub struct QuantizedSignal {
+    pub signal: Vec<QuantizedSample>,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl QuantizedSignal {
+    pub fn quantize(signal: &[Sample], quantization_level: u32) -> QuantizedSignal {
+        let min = signal.iter().cloned().reduce(f64::min).unwrap();
+        let max = signal.iter().cloned().reduce(f64::max).unwrap();
+
+        let signal = signal
+            .iter()
+            .map(|sample| Quantizable::quantize(*sample, min, max, quantization_level))
+            .collect();
+        QuantizedSignal { signal, min, max }
+    }
+
+    pub fn unquantize(band: &QuantizedSignal, quantization_level: u32) -> Vec<Sample> {
+        band.signal
+            .iter()
+            .map(|quantized| {
+                Quantizable::unquantize(*quantized, band.min, band.max, quantization_level)
+            })
+            .collect()
+    }
+
+    pub fn with_signal(&self, signal: Vec<QuantizedSample>) -> QuantizedSignal {
+        QuantizedSignal {
+            signal,
+            min: self.min,
+            max: self.max,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.signal.len()
+    }
+}
+
 pub type QuantizedSample = i32;
 
 pub trait Quantizable: Sized {
