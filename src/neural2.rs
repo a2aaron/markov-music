@@ -89,7 +89,7 @@ impl SamplePredictor {
             EmbeddingConfig::default(),
         );
 
-        let linear_1 = linear(vs, EMBED_SIZE, HIDDEN_SIZE);
+        let linear_1 = linear(vs, FRAME_SIZE * EMBED_SIZE, HIDDEN_SIZE);
         // I think the pytorch code is wrong--this should take in something of EMBED_SIZE, not FRAME_SIZE * EMBED_SIZE
         // Maybe this was supposed to be RATIO * EMBED_SIZE, where RATIO is the upscale/downscale
         // ratio between tiers?
@@ -112,10 +112,7 @@ impl SamplePredictor {
         let num_frames = frame.size()[1] as usize;
 
         assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
-        assert_shape(
-            &[batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE],
-            &conditioning,
-        );
+        assert_shape(&[batch_size, num_frames, HIDDEN_SIZE], &conditioning);
 
         let frame = self.embed.forward(frame);
         assert_shape(&[batch_size, num_frames, FRAME_SIZE, EMBED_SIZE], &frame);

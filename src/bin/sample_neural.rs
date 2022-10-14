@@ -3,7 +3,7 @@ use std::error::Error;
 use clap::{command, Parser};
 use itertools::Itertools;
 use markov_music::neural2::{
-    assert_shape, reshape, NeuralNet, BATCH_SIZE, FRAME_SIZE, NUM_FRAMES, QUANTIZATION, SEQ_LEN,
+    assert_shape, reshape, NeuralNet, BATCH_SIZE, FRAME_SIZE, NUM_FRAMES, QUANTIZATION,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -46,10 +46,11 @@ struct Audio {
     max: f32,
     rounded_min: i64,
     len: usize,
+    sample_rate: usize,
 }
 
 impl Audio {
-    fn new(input: &[i16]) -> Audio {
+    fn new(input: &[i16], sample_rate: usize) -> Audio {
         let len = input.len();
         let max = input.iter().cloned().max().unwrap() as f32;
         let min = input.iter().cloned().min().unwrap() as f32;
@@ -77,6 +78,7 @@ impl Audio {
             max,
             rounded_min,
             len,
+            sample_rate,
         }
     }
 
@@ -93,7 +95,8 @@ impl Audio {
             .collect_vec()
     }
 
-    fn batch(&self, batch_size: usize, seq_len: usize) -> (Tensor, Tensor) {
+    fn batch(&self, batch_size: usize, num_frames: usize, frame_size: usize) -> (Tensor, Tensor) {
+        let seq_len = num_frames * frame_size;
         let (input, targets): (Vec<_>, Vec<_>) = (0..batch_size)
             .map(|_| {
                 let i = rand::thread_rng().gen_range(0..(self.len - seq_len - 1)) as i64;
@@ -112,7 +115,21 @@ impl Audio {
         assert_shape(&[batch_size, seq_len], &input);
         assert_shape(&[batch_size, seq_len], &targets);
 
+        let input = reshape(&[batch_size, num_frames, frame_size], &input);
+        let targets = reshape(&[batch_size, num_frames, frame_size], &targets);
+
+        assert_shape(&[batch_size, num_frames, frame_size], &input);
+        assert_shape(&[batch_size, num_frames, frame_size], &targets);
+
         (input, targets)
+    }
+
+    fn write_to_file(&self, name: &str, audio: &[i64]) {
+        let samples = self.unnormalize(audio);
+        let samples = samples.iter().map(|x| *x as i16).collect_vec();
+        let samples = samples.iter().map(|x| *x as i16).collect_vec();
+
+        util::write_wav(name, self.sample_rate, &samples, None).unwrap();
     }
 }
 
@@ -122,7 +139,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut args = Args::parse();
 
     let (signal, _, sample_rate) = util::read_file(&args.in_path)?;
-    let signal = Audio::new(&signal);
+    let signal = Audio::new(&signal, sample_rate);
+
     println!("Input samples: {}", signal.len);
 
     let length = sample_rate * args.length;
@@ -133,22 +151,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut network = NeuralNet::new(&vs, device);
     for epoch_i in 0.. {
-        let (inputs, targets) = signal.batch(BATCH_SIZE, SEQ_LEN);
-        let frames = inputs.reshape(&[BATCH_SIZE as i64, NUM_FRAMES as i64, FRAME_SIZE as i64]);
-        let targets = targets.reshape(&[BATCH_SIZE as i64, NUM_FRAMES as i64, FRAME_SIZE as i64]);
-
+        let (frames, targets) = signal.batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
         let loss = network.backward(&frames, &targets);
         println!("Epoch {}, loss = {:.5}", epoch_i, loss);
 
         if epoch_i != 0 && epoch_i % args.generate_every == 0 {
-            generate(
-                &args.out_path,
-                epoch_i,
-                sample_rate,
-                length,
-                &network,
-                &signal,
-            );
+            generate(&args.out_path, epoch_i, length, &network, &signal);
         }
 
         if let Some(path) = &args.settings_file {
@@ -166,14 +174,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn generate(
-    name: &str,
-    epoch_i: usize,
-    sample_rate: usize,
-    length: usize,
-    network: &NeuralNet,
-    signal: &Audio,
-) {
+fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, signal: &Audio) {
     let (mut frame, mut state) = network.zeros(1);
     let mut samples = Vec::with_capacity(length);
     println!("Generating {} samples...", length);
@@ -188,14 +189,5 @@ fn generate(
         }
     }
 
-    let samples = signal.unnormalize(&samples);
-    let samples = samples.iter().map(|x| *x as i16).collect_vec();
-
-    util::write_wav(
-        format!("{}{}.wav", name, epoch_i),
-        sample_rate,
-        &samples,
-        None,
-    )
-    .unwrap();
+    signal.write_to_file(&format!("{}{}.wav", name, epoch_i), &samples);
 }
