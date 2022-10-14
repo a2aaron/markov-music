@@ -4,27 +4,37 @@ use clap::{command, Parser};
 use itertools::Itertools;
 use markov_music::neural2::{NeuralNet, BATCH_SIZE, QUANTIZATION, SEQ_LEN};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use tch::{nn, Device, IndexOp, Tensor};
 
 mod util;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[command(author, version, about, long_about = None)]
 /// A WAV file generator powered by markov chain.
 struct Args {
     /// Path to input MP3 file.
     #[arg(short, long = "in")]
     in_path: String,
-    /// Path to output WAV file.
-    #[arg(short, long = "out", default_value = "out.wav")]
+    /// Name of output WAV file. (will always have suffix of "i.wav", where i is the ith epoch)
+    #[arg(short, long = "out", default_value = "epoch")]
     out_path: String,
-    #[arg(long, default_value_t = 1000)]
-    epochs: usize,
     /// Length, in seconds, of audio to generate.
     #[arg(long, default_value_t = 60)]
     length: usize,
     #[arg(long, default_value_t = 10)]
     generate_every: usize,
+    /// If passed, allows settings to be updated each epoch via a text file
+    #[arg(long)]
+    settings_file: Option<String>,
+}
+
+impl Args {
+    fn try_from_file(path: &str) -> Result<Args, Box<dyn Error>> {
+        let mut args: Args = serde_json::from_slice(&std::fs::read(path)?)?;
+        args.settings_file = Some(path.to_string());
+        Ok(args)
+    }
 }
 
 struct Audio {
@@ -103,7 +113,7 @@ impl Audio {
 fn main() -> Result<(), Box<dyn Error>> {
     std::env::set_var("RUST_BACKTRACE", "1");
 
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     let (signal, _, sample_rate) = util::read_file(&args.in_path)?;
     let signal = Audio::new(&signal);
@@ -116,19 +126,45 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vs = nn::VarStore::new(device);
 
     let mut network = NeuralNet::new(&vs, device);
-    for epoch_i in 0..args.epochs {
+    for epoch_i in 0.. {
         let (inputs_onehot, targets) = signal.batch(SEQ_LEN, BATCH_SIZE);
         let loss = network.train(inputs_onehot, targets);
-        println!("Epoch {}/{}, loss = {:.5}", epoch_i, args.epochs, loss);
+        println!("Epoch {}, loss = {:.5}", epoch_i, loss);
 
         if epoch_i % args.generate_every == 0 {
-            generate(epoch_i, sample_rate, length, &network, &signal);
+            generate(
+                &args.out_path,
+                epoch_i,
+                sample_rate,
+                length,
+                &network,
+                &signal,
+            );
+        }
+
+        if let Some(path) = &args.settings_file {
+            match Args::try_from_file(path) {
+                Ok(new_args) => {
+                    if new_args != args {
+                        println!("Updated args!");
+                        args = new_args;
+                    }
+                }
+                Err(err) => println!("Couldn't update args: {:?}", err),
+            }
         }
     }
     Ok(())
 }
 
-fn generate(epoch: usize, sample_rate: usize, length: usize, network: &NeuralNet, signal: &Audio) {
+fn generate(
+    name: &str,
+    epoch_i: usize,
+    sample_rate: usize,
+    length: usize,
+    network: &NeuralNet,
+    signal: &Audio,
+) {
     let mut input = 0;
     let mut samples = Vec::with_capacity(length);
     let mut state = network.zero_state();
@@ -147,5 +183,11 @@ fn generate(epoch: usize, sample_rate: usize, length: usize, network: &NeuralNet
     let samples = signal.unnormalize(&samples);
     let samples = samples.iter().map(|x| *x as i16).collect_vec();
 
-    util::write_wav(format!("epoch{}.wav", epoch), sample_rate, &samples, None).unwrap();
+    util::write_wav(
+        format!("{}{}.wav", name, epoch_i),
+        sample_rate,
+        &samples,
+        None,
+    )
+    .unwrap();
 }

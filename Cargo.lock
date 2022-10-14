@@ -714,6 +714,8 @@ dependencies = [
  "minimp3",
  "rand",
  "rayon",
+ "serde",
+ "serde_json",
  "tch",
  "wav",
 ]

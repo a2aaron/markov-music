@@ -5,3 +5,4 @@
 *.mp3
 /midly
 input.txt
+neural_parameters.json
