@@ -8,26 +8,23 @@ use tch::{
 };
 
 // Hidden size of the LSTM
-pub const HIDDEN_SIZE: usize = 7; // Databots value: 1024?
-pub const BATCH_SIZE: usize = 2;
+pub const HIDDEN_SIZE: usize = 256; // Databots value: 1024?
+pub const BATCH_SIZE: usize = 128;
 // Length of BPTT sequence, in frames
-pub const NUM_FRAMES: usize = 3;
+pub const NUM_FRAMES: usize = 16;
 // Length of BPTT sequence, in samples (how long is a sequence during backprop)
 pub const SEQ_LEN: usize = NUM_FRAMES * FRAME_SIZE;
 // Quantization level (256 = 8 bit)
-pub const QUANTIZATION: usize = 13;
-
-// The ratio of frame sizes for each layer
-pub const RATIO: usize = 4;
+pub const QUANTIZATION: usize = 256;
 
 // Number of RNNs layers to stack in the LSTM
 pub const N_RNN: usize = 1;
 // Size of frame, in samples
-pub const FRAME_SIZE: usize = 5;
+pub const FRAME_SIZE: usize = 16;
 // Embedding size (embedding is like one-hot encoding, but
 // denser--network learns how to translate QUANTIZATION symbols into EMBED_SIZE dim vector)
 // Maybe this can be removed when EMBED_SIZE == QUANTIZATION?
-pub const EMBED_SIZE: usize = 11;
+pub const EMBED_SIZE: usize = 256;
 
 pub struct FrameLevelRNN {
     lstm: nn::LSTM,
@@ -52,17 +49,12 @@ impl FrameLevelRNN {
 
         // TODO: This probably need to be in range [-2.0, 2.0] as described in the code.
         let frame_float = frame.to_kind(Kind::Float);
-        print_shape("FrameLevelRNN::forward - frame", &frame);
         assert_shape(&[batch_size, num_frames, FRAME_SIZE], frame);
 
-        print_shape("FrameLevelRNN::forward - state", &state.c());
-
         let (conditioning, state) = self.lstm.seq_init(&frame_float, state);
-        print_shape("FrameLevelRNN::forward - conditioning", &conditioning);
         assert_shape(&[batch_size, num_frames, HIDDEN_SIZE], &conditioning);
 
         let conditioning = self.linear.forward(&conditioning);
-        print_shape("FrameLevelRNN::forward - linear      ", &conditioning);
 
         assert_shape(
             &[batch_size, num_frames, FRAME_SIZE * HIDDEN_SIZE],
@@ -111,35 +103,19 @@ impl SamplePredictor {
     fn forward(&self, conditioning: &Tensor, frame: &Tensor) -> Tensor {
         let batch_size = frame.size()[0] as usize;
         let num_frames = frame.size()[1] as usize;
-        // Frame:        [BATCH_SIZE, N_FRAMES, FRAME_SIZE]
-        // Embeded into: [BATCH_SIZE, N_FRAMES, FRAME_SIZE, EMBED_SIZE]
-        // Linear'd into [BATCH_SIZE, N_FRAMES, FRAME_SIZE, HIDDEN_SIZE]
 
-        // Conditioning: [BATCH_SIZE, N_FRAMES, HIDDEN_SIZE]
-        // Upsampled to: [BATCH_SIZE, N_FRAMES, FRAME_SIZE??, HIDDEN_SIZE]
-        // Reshaped into [BATCH_SIZE, N_FRAMES * FRAME_SIZE??, HIDDEN_SIZE]
-
-        // Added together and MLP'd into [BATCH_SIZE, N_FRAMES, QUANTIZATION]
-
-        print_shape("SamplePredictor::forward - frame         ", &frame);
         assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
-        print_shape("SamplePredictor::forward - conditioning  ", &conditioning);
         assert_shape(
             &[batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE],
             &conditioning,
         );
 
         let frame = self.embed.forward(frame);
-        print_shape("SamplePredictor::forward - embeded frame ", &frame);
         assert_shape(&[batch_size, num_frames, FRAME_SIZE, EMBED_SIZE], &frame);
 
         let frame = reshape(&[batch_size, num_frames * FRAME_SIZE, EMBED_SIZE], &frame);
-        print_shape("SamplePredictor::forward - reshaped frame", &frame);
         let mut out = self.linear_1.forward(&frame);
-
-        print_shape("SamplePredictor::forward - linear 1      ", &out);
         out += conditioning;
-
         let out = self.linear_2.forward(&out);
         let out = out.relu();
         let out = self.linear_3.forward(&out);
@@ -192,18 +168,10 @@ impl NeuralNet {
     pub fn forward(&self, frame: &Tensor, state: &LSTMState) -> (Tensor, LSTMState) {
         let (conditioning, state) = self.frame_level_rnn.forward(frame, state);
         let output_samples = self.sample_predictor.forward(&conditioning, &frame);
-        print_shape(
-            "NeuralNet::forward - output_samples        ",
-            &output_samples,
-        );
         let output_samples = output_samples
             .squeeze_dim(0)
             .softmax(-1, Kind::Float)
             .multinomial(1, false);
-        print_shape(
-            "NeuralNet::forward - output_samples softmax",
-            &output_samples,
-        );
         (output_samples, state)
     }
 
@@ -214,19 +182,12 @@ impl NeuralNet {
         let zero_state = self.zeros(BATCH_SIZE).1;
         let (conditioning, _) = self.frame_level_rnn.forward(&frame, &zero_state);
 
-        print_shape("backwards - conditioning, reshape", &conditioning);
-
-        print_shape("backwards - frame                ", &frame);
-
         let logits = self.sample_predictor.forward(&conditioning, &frame);
 
-        print_shape("backwards - logits", &logits);
         assert_shape(
             &[BATCH_SIZE, NUM_FRAMES * FRAME_SIZE, QUANTIZATION],
             &logits,
         );
-
-        print_shape("backwards - targets", &targets);
 
         let batch_size = BATCH_SIZE as i64;
         let seq_len = SEQ_LEN as i64;
@@ -241,39 +202,6 @@ impl NeuralNet {
 
         f32::from(loss)
     }
-}
-
-fn print_shape(name: &str, tensor: &Tensor) {
-    let shape = tensor
-        .size()
-        .into_iter()
-        .map(|x| {
-            let x = x as usize;
-            if x == 1 {
-                return "1".to_string();
-            }
-            let mut factors = vec![];
-            let primes = [2, 3, 5, 7, 11, 13];
-            for prime in primes {
-                if x % prime == 0 {
-                    factors.push(prime);
-                }
-            }
-            factors
-                .into_iter()
-                .map(|factor| match factor {
-                    2 => "BATCH_SIZE".to_string(),
-                    3 => "NUM_FRAMES".to_string(),
-                    5 => "FRAME_SIZE".to_string(),
-                    7 => "HIDDEN_SIZE".to_string(),
-                    11 => "EMBED_SIZE".to_string(),
-                    13 => "QUANTIZATION".to_string(),
-                    _ => unreachable!(),
-                })
-                .join(" * ")
-        })
-        .join(", ");
-    // println!("{}: {} ({:?})", name, shape, tensor.kind());
 }
 
 fn linear(vs: &VarStore, in_dim: usize, out_dim: usize) -> nn::Linear {
