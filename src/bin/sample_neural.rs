@@ -2,7 +2,9 @@ use std::error::Error;
 
 use clap::{command, Parser};
 use itertools::Itertools;
-use markov_music::neural2::{NeuralNet, BATCH_SIZE, QUANTIZATION, SEQ_LEN};
+use markov_music::neural2::{
+    assert_shape, NeuralNet, BATCH_SIZE, FRAME_SIZE, NUM_FRAMES, QUANTIZATION, SEQ_LEN,
+};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tch::{nn, Device, IndexOp, Tensor};
@@ -39,7 +41,7 @@ impl Args {
 
 struct Audio {
     audio: Tensor,
-    audio_onehot: Tensor,
+    // audio_onehot: Tensor,
     min: f32,
     max: f32,
     rounded_min: i64,
@@ -67,10 +69,10 @@ impl Audio {
         assert!(audio.iter().all(|x| 0 <= *x && *x < QUANTIZATION as i64));
 
         let audio = Tensor::of_slice(&audio);
-        let audio_onehot = audio.onehot(QUANTIZATION as i64);
+        // let audio_onehot = audio.onehot(QUANTIZATION as i64);
         Audio {
             audio,
-            audio_onehot,
+            // audio_onehot,
             min,
             max,
             rounded_min,
@@ -91,22 +93,26 @@ impl Audio {
             .collect_vec()
     }
 
-    fn batch(&self, seq_len: usize, batch_size: usize) -> (Tensor, Tensor) {
-        let seq_len = seq_len as i64;
-
-        let (input_one_hots, targets): (Vec<_>, Vec<_>) = (0..batch_size)
+    fn batch(&self, batch_size: usize, seq_len: usize) -> (Tensor, Tensor) {
+        let (input, targets): (Vec<_>, Vec<_>) = (0..batch_size)
             .map(|_| {
-                let i = rand::thread_rng().gen_range(0..(self.len as i64 - (seq_len + 1)));
-                let input_one_hots = self.audio_onehot.i(i..i + seq_len);
-                let targets = self.audio.i((i + 1)..(i + 1) + seq_len);
-                (input_one_hots, targets)
+                let i = rand::thread_rng().gen_range(0..(self.len - seq_len - 1)) as i64;
+                let input = self.audio.i(i..i + seq_len as i64);
+                let targets = self.audio.i((i + 1)..(i + 1) + seq_len as i64);
+
+                assert_shape(&[seq_len], &input);
+                assert_shape(&[seq_len], &targets);
+                (input, targets)
             })
             .unzip();
 
-        let input_one_hots = Tensor::stack(&input_one_hots, 0);
+        let input = Tensor::stack(&input, 0);
         let targets = Tensor::stack(&targets, 0);
 
-        (input_one_hots, targets)
+        assert_shape(&[batch_size, seq_len], &input);
+        assert_shape(&[batch_size, seq_len], &targets);
+
+        (input, targets)
     }
 }
 
@@ -127,8 +133,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut network = NeuralNet::new(&vs, device);
     for epoch_i in 0.. {
-        let (inputs_onehot, targets) = signal.batch(SEQ_LEN, BATCH_SIZE);
-        let loss = network.train(inputs_onehot, targets);
+        let (inputs, targets) = signal.batch(BATCH_SIZE, SEQ_LEN);
+        let frames = inputs.reshape(&[BATCH_SIZE as i64, NUM_FRAMES as i64, FRAME_SIZE as i64]);
+        let targets = targets.reshape(&[BATCH_SIZE as i64, NUM_FRAMES as i64, FRAME_SIZE as i64]);
+
+        let loss = network.backward(&frames, &targets);
         println!("Epoch {}, loss = {:.5}", epoch_i, loss);
 
         if epoch_i % args.generate_every == 0 {
@@ -165,15 +174,14 @@ fn generate(
     network: &NeuralNet,
     signal: &Audio,
 ) {
-    let mut input = 0;
+    let (mut frame, mut state) = network.zeros();
     let mut samples = Vec::with_capacity(length);
-    let mut state = network.zero_state();
     println!("Generating {} samples...", length);
     while samples.len() < length {
-        let (next, new_state) = network.compute(input, state);
-        state = new_state;
-        samples.push(next.clone());
-        input = next;
+        let (next_samples, next_state) = network.forward(&frame, &state);
+        state = next_state;
+        samples.extend(Vec::<f32>::from(&next_samples).iter().map(|x| *x as i64));
+        frame = next_samples;
 
         if samples.len() % (length / 10).max(10_000) == 0 {
             println!("Generating... ({:?} / {})", samples.len(), length)
