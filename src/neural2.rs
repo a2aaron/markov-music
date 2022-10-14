@@ -87,7 +87,11 @@ impl SamplePredictor {
         );
 
         let linear_1 = linear(vs, EMBED_SIZE, HIDDEN_SIZE);
+        // I think the pytorch code is wrong--this should take in something of EMBED_SIZE, not FRAME_SIZE * EMBED_SIZE
+        // Maybe this was supposed to be RATIO * EMBED_SIZE, where RATIO is the upscale/downscale
+        // ratio between tiers?
         // let linear_1 = linear(vs, FRAME_SIZE * EMBED_SIZE, HIDDEN_SIZE);
+
         let linear_2 = linear(vs, HIDDEN_SIZE, HIDDEN_SIZE);
         let linear_3 = linear(vs, HIDDEN_SIZE, HIDDEN_SIZE);
         let linear_out = linear(vs, HIDDEN_SIZE, QUANTIZATION);
@@ -127,17 +131,6 @@ impl SamplePredictor {
         out
     }
 }
-pub struct NetworkValues {
-    pub frame: Tensor,
-    pub state: LSTMState,
-}
-
-impl NetworkValues {
-    pub fn get_samples(&self) -> Vec<i64> {
-        todo!();
-    }
-}
-
 pub struct NeuralNet {
     frame_level_rnn: FrameLevelRNN,
     sample_predictor: SamplePredictor,
