@@ -2,9 +2,9 @@ use std::error::Error;
 
 use clap::{command, Parser};
 use itertools::Itertools;
-use markov_music::neural2::{NeuralNet, SEQ_LEN};
+use markov_music::neural2::{NeuralNet, BATCH_SIZE, QUANTIZATION, SEQ_LEN};
 use rand::Rng;
-use tch::{nn, Device};
+use tch::{nn, Device, IndexOp, Tensor};
 
 mod util;
 
@@ -18,27 +18,31 @@ struct Args {
     /// Path to output WAV file.
     #[arg(short, long = "out", default_value = "out.wav")]
     out_path: String,
-    #[arg(long, default_value_t = 10)]
-    epochs: usize,
     #[arg(long, default_value_t = 1000)]
-    batch_size: usize,
+    epochs: usize,
     /// Length, in seconds, of audio to generate.
     #[arg(long, default_value_t = 60)]
     length: usize,
+    #[arg(long, default_value_t = 10)]
+    generate_every: usize,
 }
 
 struct Audio {
-    audio: Vec<i64>,
+    audio: Tensor,
+    audio_onehot: Tensor,
     min: f32,
     max: f32,
     rounded_min: i64,
+    len: usize,
 }
 
 impl Audio {
     fn new(input: &[i16]) -> Audio {
+        let len = input.len();
         let max = input.iter().cloned().max().unwrap() as f32;
         let min = input.iter().cloned().min().unwrap() as f32;
-        let scale = (max - min) / 255.0;
+        let quantization = (QUANTIZATION - 1) as f32;
+        let scale = (max - min) / quantization;
         let audio = input
             .iter()
             .cloned()
@@ -50,31 +54,23 @@ impl Audio {
 
         let rounded_min = *audio.iter().min().unwrap();
         let audio = audio.iter().cloned().map(|x| x - rounded_min).collect_vec();
-        assert!(
-            *audio.iter().min().unwrap() >= 0i64,
-            "{}",
-            audio.iter().min().unwrap()
-        );
-        assert!(
-            *audio.iter().max().unwrap() < 256i64,
-            "{}",
-            audio.iter().max().unwrap()
-        );
-        assert_eq!((0..256).len(), 256);
+        assert!(audio.iter().all(|x| 0 <= *x && *x < QUANTIZATION as i64));
+
+        let audio = Tensor::of_slice(&audio);
+        let audio_onehot = audio.onehot(QUANTIZATION as i64);
         Audio {
             audio,
+            audio_onehot,
             min,
             max,
             rounded_min,
+            len,
         }
     }
 
-    fn len(&self) -> usize {
-        self.audio.len()
-    }
-
     fn unnormalize(&self, audio: &[i64]) -> Vec<f32> {
-        let scale = (self.max - self.min) / 255.0;
+        let quantization = (QUANTIZATION - 1) as f32;
+        let scale = (self.max - self.min) / quantization;
         audio
             .iter()
             .cloned()
@@ -85,9 +81,22 @@ impl Audio {
             .collect_vec()
     }
 
-    fn random_example(&self) -> &[i64] {
-        let i = rand::thread_rng().gen_range(0..(self.audio.len() - (SEQ_LEN + 1)));
-        &self.audio[i..i + SEQ_LEN]
+    fn batch(&self, seq_len: usize, batch_size: usize) -> (Tensor, Tensor) {
+        let seq_len = seq_len as i64;
+
+        let (input_one_hots, targets): (Vec<_>, Vec<_>) = (0..batch_size)
+            .map(|_| {
+                let i = rand::thread_rng().gen_range(0..(self.len as i64 - (seq_len + 1)));
+                let input_one_hots = self.audio_onehot.i(i..i + seq_len);
+                let targets = self.audio.i((i + 1)..(i + 1) + seq_len);
+                (input_one_hots, targets)
+            })
+            .unzip();
+
+        let input_one_hots = Tensor::stack(&input_one_hots, 0);
+        let targets = Tensor::stack(&targets, 0);
+
+        (input_one_hots, targets)
     }
 }
 
@@ -98,7 +107,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (signal, _, sample_rate) = util::read_file(&args.in_path)?;
     let signal = Audio::new(&signal);
-    println!("Input samples: {}", signal.len());
+    println!("Input samples: {}", signal.len);
 
     let length = sample_rate * args.length;
 
@@ -106,24 +115,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Training neural net on {:?}", device);
     let vs = nn::VarStore::new(device);
 
-    let quantization = 256;
-    let mut network = NeuralNet::new(&vs, device, quantization);
+    let mut network = NeuralNet::new(&vs, device);
     for epoch_i in 0..args.epochs {
-        let mut batch_loss = 0.0;
-        for _batch_i in 0..args.batch_size {
-            let input = signal.random_example();
-            let loss = network.train(input);
-            batch_loss += loss;
-            // println!("Batch {}/{}", _batch_i, args.batch_size);
-        }
-        println!(
-            "Epoch {}/{}, Average loss = {:.5}",
-            epoch_i,
-            args.epochs,
-            batch_loss / args.batch_size as f32
-        );
+        let (inputs_onehot, targets) = signal.batch(SEQ_LEN, BATCH_SIZE);
+        let loss = network.train(inputs_onehot, targets);
+        println!("Epoch {}/{}, loss = {:.5}", epoch_i, args.epochs, loss);
 
-        if epoch_i % 10 == 0 {
+        if epoch_i % args.generate_every == 0 {
             generate(epoch_i, sample_rate, length, &network, &signal);
         }
     }
@@ -141,7 +139,7 @@ fn generate(epoch: usize, sample_rate: usize, length: usize, network: &NeuralNet
         samples.push(next.clone());
         input = next;
 
-        if samples.len() % 10_000 == 0 {
+        if samples.len() % (length / 10).max(10_000) == 0 {
             println!("Generating... ({:?} / {})", samples.len(), length)
         }
     }
