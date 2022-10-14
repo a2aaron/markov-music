@@ -47,22 +47,32 @@ impl FrameLevelRNN {
     }
 
     fn forward(&self, frame: &Tensor, state: &LSTMState) -> (Tensor, LSTMState) {
-        assert_shape(&[0, NUM_FRAMES * FRAME_SIZE], frame);
+        let batch_size = frame.size()[0] as usize;
+        let num_frames = frame.size()[1] as usize;
 
-        let state = self.lstm.step(frame, state);
+        // TODO: This probably need to be in range [-2.0, 2.0] as described in the code.
+        let frame_float = frame.to_kind(Kind::Float);
+        print_shape("FrameLevelRNN::forward - frame", &frame);
+        assert_shape(&[batch_size, num_frames, FRAME_SIZE], frame);
 
-        // TODO: should this be state.h() or state.c()? (hidden vs compute state)
-        let conditioning = self.linear.forward(&state.c());
-        assert_shape(&[0, NUM_FRAMES, FRAME_SIZE * HIDDEN_SIZE], &conditioning);
+        print_shape("FrameLevelRNN::forward - state", &state.c());
 
-        let new_shape = [
-            conditioning.size()[0],
-            conditioning.size()[1] * FRAME_SIZE as i64,
-            HIDDEN_SIZE as i64,
-        ];
-        let conditioning = conditioning.reshape(&new_shape);
+        let (conditioning, state) = self.lstm.seq_init(&frame_float, state);
+        print_shape("FrameLevelRNN::forward - conditioning", &conditioning);
+        assert_shape(&[batch_size, num_frames, HIDDEN_SIZE], &conditioning);
 
-        assert_shape(&[0, NUM_FRAMES * FRAME_SIZE, HIDDEN_SIZE], &conditioning);
+        let conditioning = self.linear.forward(&conditioning);
+        print_shape("FrameLevelRNN::forward - linear      ", &conditioning);
+
+        assert_shape(
+            &[batch_size, num_frames, FRAME_SIZE * HIDDEN_SIZE],
+            &conditioning,
+        );
+
+        let conditioning = reshape(
+            &[batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE],
+            &conditioning,
+        );
         (conditioning, state)
     }
 }
@@ -99,6 +109,8 @@ impl SamplePredictor {
     }
 
     fn forward(&self, conditioning: &Tensor, frame: &Tensor) -> Tensor {
+        let batch_size = frame.size()[0] as usize;
+        let num_frames = frame.size()[1] as usize;
         // Frame:        [BATCH_SIZE, N_FRAMES, FRAME_SIZE]
         // Embeded into: [BATCH_SIZE, N_FRAMES, FRAME_SIZE, EMBED_SIZE]
         // Linear'd into [BATCH_SIZE, N_FRAMES, FRAME_SIZE, HIDDEN_SIZE]
@@ -109,16 +121,19 @@ impl SamplePredictor {
 
         // Added together and MLP'd into [BATCH_SIZE, N_FRAMES, QUANTIZATION]
 
-        print_shape("SamplePredictor::forward - conditioning  ", &conditioning);
         print_shape("SamplePredictor::forward - frame         ", &frame);
-        assert_shape(&[0, 0, FRAME_SIZE], &frame);
-        assert_shape(&[0, 0, HIDDEN_SIZE], &conditioning);
+        assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
+        print_shape("SamplePredictor::forward - conditioning  ", &conditioning);
+        assert_shape(
+            &[batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE],
+            &conditioning,
+        );
 
         let frame = self.embed.forward(frame);
         print_shape("SamplePredictor::forward - embeded frame ", &frame);
-        assert_shape(&[0, 0, FRAME_SIZE, EMBED_SIZE], &frame);
+        assert_shape(&[batch_size, num_frames, FRAME_SIZE, EMBED_SIZE], &frame);
 
-        let frame = reshape(&[BATCH_SIZE, NUM_FRAMES * FRAME_SIZE, EMBED_SIZE], &frame);
+        let frame = reshape(&[batch_size, num_frames * FRAME_SIZE, EMBED_SIZE], &frame);
         print_shape("SamplePredictor::forward - reshaped frame", &frame);
         let mut out = self.linear_1.forward(&frame);
 
@@ -131,7 +146,7 @@ impl SamplePredictor {
         let out = out.relu();
         let out = self.linear_out.forward(&out);
 
-        assert_shape(&[0, 0, QUANTIZATION], &out);
+        assert_shape(&[batch_size, num_frames * FRAME_SIZE, QUANTIZATION], &out);
 
         out
     }
@@ -165,49 +180,44 @@ impl NeuralNet {
         }
     }
 
-    pub fn zeros(&self) -> (Tensor, LSTMState) {
-        let frame = Tensor::zeros(&[1, FRAME_SIZE as i64, 1], (Kind::Float, self.device));
-        let state = self.frame_level_rnn.lstm.zero_state(1);
+    pub fn zeros(&self, batch_dim: usize) -> (Tensor, LSTMState) {
+        let frame = Tensor::zeros(
+            &[batch_dim as i64, 1, FRAME_SIZE as i64],
+            (Kind::Int64, self.device),
+        );
+        let state = self.frame_level_rnn.lstm.zero_state(batch_dim as i64);
         (frame, state)
     }
 
     pub fn forward(&self, frame: &Tensor, state: &LSTMState) -> (Tensor, LSTMState) {
         let (conditioning, state) = self.frame_level_rnn.forward(frame, state);
         let output_samples = self.sample_predictor.forward(&conditioning, &frame);
-
+        print_shape(
+            "NeuralNet::forward - output_samples        ",
+            &output_samples,
+        );
         let output_samples = output_samples
             .squeeze_dim(0)
             .softmax(-1, Kind::Float)
             .multinomial(1, false);
+        print_shape(
+            "NeuralNet::forward - output_samples softmax",
+            &output_samples,
+        );
         (output_samples, state)
     }
 
     pub fn backward(&mut self, frame: &Tensor, targets: &Tensor) -> f32 {
         assert_shape(&[BATCH_SIZE, NUM_FRAMES, FRAME_SIZE], &frame);
         assert_shape(&[BATCH_SIZE, NUM_FRAMES, FRAME_SIZE], &targets);
-        // TODO: This probably need to be in range [-2.0, 2.0] as described in the code.
-        let frame_float = frame.to_kind(Kind::Float);
 
-        let (conditioning, _) = self.frame_level_rnn.lstm.seq(&frame_float);
-        print_shape("backwards - conditioning, LSTM   ", &conditioning);
-        assert_shape(&[BATCH_SIZE, NUM_FRAMES, HIDDEN_SIZE], &conditioning);
+        let zero_state = self.zeros(BATCH_SIZE).1;
+        let (conditioning, _) = self.frame_level_rnn.forward(&frame, &zero_state);
 
-        let conditioning = self.frame_level_rnn.linear.forward(&conditioning);
-        assert_shape(
-            &[BATCH_SIZE, NUM_FRAMES, FRAME_SIZE * HIDDEN_SIZE],
-            &conditioning,
-        );
-        print_shape("backwards - conditioning, linear ", &conditioning);
-
-        let conditioning = reshape(
-            &[BATCH_SIZE, NUM_FRAMES * FRAME_SIZE, HIDDEN_SIZE],
-            &conditioning,
-        );
         print_shape("backwards - conditioning, reshape", &conditioning);
 
         print_shape("backwards - frame                ", &frame);
 
-        println!("Generating samples");
         let logits = self.sample_predictor.forward(&conditioning, &frame);
 
         print_shape("backwards - logits", &logits);
@@ -239,6 +249,9 @@ fn print_shape(name: &str, tensor: &Tensor) {
         .into_iter()
         .map(|x| {
             let x = x as usize;
+            if x == 1 {
+                return "1".to_string();
+            }
             let mut factors = vec![];
             let primes = [2, 3, 5, 7, 11, 13];
             for prime in primes {
@@ -249,18 +262,18 @@ fn print_shape(name: &str, tensor: &Tensor) {
             factors
                 .into_iter()
                 .map(|factor| match factor {
-                    2 => "BATCH_SIZE",
-                    3 => "NUM_FRAMES",
-                    5 => "FRAME_SIZE",
-                    7 => "HIDDEN_SIZE",
-                    11 => "EMBED_SIZE",
-                    13 => "QUANTIZATION",
+                    2 => "BATCH_SIZE".to_string(),
+                    3 => "NUM_FRAMES".to_string(),
+                    5 => "FRAME_SIZE".to_string(),
+                    7 => "HIDDEN_SIZE".to_string(),
+                    11 => "EMBED_SIZE".to_string(),
+                    13 => "QUANTIZATION".to_string(),
                     _ => unreachable!(),
                 })
                 .join(" * ")
         })
         .join(", ");
-    println!("{}: {} ({:?})", name, shape, tensor.kind());
+    // println!("{}: {} ({:?})", name, shape, tensor.kind());
 }
 
 fn linear(vs: &VarStore, in_dim: usize, out_dim: usize) -> nn::Linear {

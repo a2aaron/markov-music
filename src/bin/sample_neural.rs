@@ -3,7 +3,7 @@ use std::error::Error;
 use clap::{command, Parser};
 use itertools::Itertools;
 use markov_music::neural2::{
-    assert_shape, NeuralNet, BATCH_SIZE, FRAME_SIZE, NUM_FRAMES, QUANTIZATION, SEQ_LEN,
+    assert_shape, reshape, NeuralNet, BATCH_SIZE, FRAME_SIZE, NUM_FRAMES, QUANTIZATION, SEQ_LEN,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -174,14 +174,14 @@ fn generate(
     network: &NeuralNet,
     signal: &Audio,
 ) {
-    let (mut frame, mut state) = network.zeros();
+    let (mut frame, mut state) = network.zeros(1);
     let mut samples = Vec::with_capacity(length);
     println!("Generating {} samples...", length);
     while samples.len() < length {
         let (next_samples, next_state) = network.forward(&frame, &state);
         state = next_state;
         samples.extend(Vec::<f32>::from(&next_samples).iter().map(|x| *x as i64));
-        frame = next_samples;
+        frame = reshape(&[1, 1, FRAME_SIZE], &next_samples);
 
         if samples.len() % (length / 10).max(10_000) == 0 {
             println!("Generating... ({:?} / {})", samples.len(), length)
