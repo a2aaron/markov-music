@@ -46,16 +46,19 @@ impl FrameLevelRNN {
     fn forward(&self, frame: &Tensor, state: &LSTMState) -> (Tensor, LSTMState) {
         let batch_size = frame.size()[0] as usize;
         let num_frames = frame.size()[1] as usize;
+        assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
 
         // TODO: This probably need to be in range [-2.0, 2.0] as described in the code.
-        let frame_float = frame.to_kind(Kind::Float);
-        assert_shape(&[batch_size, num_frames, FRAME_SIZE], frame);
+        let frame = frame.to_kind(Kind::Float);
+        let frame = frame
+            .divide_scalar((QUANTIZATION / 2) as f64)
+            .g_sub_scalar(1.0f64)
+            .g_mul_scalar(2.0f64);
 
-        let (conditioning, state) = self.lstm.seq_init(&frame_float, state);
+        let (conditioning, state) = self.lstm.seq_init(&frame, state);
         assert_shape(&[batch_size, num_frames, HIDDEN_SIZE], &conditioning);
 
         let conditioning = self.linear.forward(&conditioning);
-
         assert_shape(
             &[batch_size, num_frames, FRAME_SIZE * HIDDEN_SIZE],
             &conditioning,
@@ -160,12 +163,12 @@ impl NeuralNet {
 
     pub fn forward(&self, frame: &Tensor, state: &LSTMState) -> (Tensor, LSTMState) {
         let (conditioning, state) = self.frame_level_rnn.forward(frame, state);
-        let output_samples = self.sample_predictor.forward(&conditioning, &frame);
-        let output_samples = output_samples
+        let logits = self.sample_predictor.forward(&conditioning, &frame);
+        let samples = logits
             .squeeze_dim(0)
             .softmax(-1, Kind::Float)
             .multinomial(1, false);
-        (output_samples, state)
+        (samples, state)
     }
 
     pub fn backward(&mut self, frame: &Tensor, targets: &Tensor) -> f32 {

@@ -140,7 +140,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let loss = network.backward(&frames, &targets);
         println!("Epoch {}, loss = {:.5}", epoch_i, loss);
 
-        if epoch_i % args.generate_every == 0 {
+        if epoch_i != 0 && epoch_i % args.generate_every == 0 {
             generate(
                 &args.out_path,
                 epoch_i,
