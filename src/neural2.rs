@@ -123,6 +123,19 @@ impl Frames {
     pub fn samples(&self) -> Vec<i64> {
         Vec::<i64>::from(&self.tensor)
     }
+
+    fn unfold(&self) -> (Tensor, usize) {
+        // Get a bunch of local sliding windows across the input sequence.
+        let frame = reshape(
+            &[self.batch_size, self.num_frames * FRAME_SIZE],
+            &self.tensor,
+        );
+        let frame = frame.unfold(1, FRAME_SIZE as i64, 1);
+
+        let unfold_size = self.num_frames * FRAME_SIZE - FRAME_SIZE + 1;
+        assert_shape(&[self.batch_size, unfold_size, FRAME_SIZE], &frame);
+        (frame, unfold_size)
+    }
 }
 
 pub struct FrameLevelRNN {
@@ -220,17 +233,10 @@ impl SamplePredictor {
         }
     }
 
-    fn forward(&self, conditioning: &ConditioningVector, frame: &Frames) -> Tensor {
-        let batch_size = frame.batch_size;
-        let num_frames = frame.num_frames;
-        let frame = &frame.tensor;
-
-        // Get a bunch of local sliding windows across the input sequence.
-        let frame = reshape(&[batch_size, num_frames * FRAME_SIZE], &frame);
-        let frame = frame.unfold(1, FRAME_SIZE as i64, 1);
-
-        let unfold_size = num_frames * FRAME_SIZE - FRAME_SIZE + 1;
-        assert_shape(&[batch_size, unfold_size, FRAME_SIZE], &frame);
+    fn forward(&self, conditioning: &ConditioningVector, frame: &Tensor) -> Tensor {
+        let batch_size = frame.size()[0] as usize;
+        let unfold_size = frame.size()[1] as usize;
+        let frame = &frame;
 
         let frame = self.embed.forward(&frame);
         assert_shape(&[batch_size, unfold_size, FRAME_SIZE, EMBED_SIZE], &frame);
@@ -288,23 +294,24 @@ impl NeuralNet {
         state: &LSTMState,
         debug_mode: bool,
     ) -> (Vec<i64>, LSTMState) {
+        assert_eq!(sliding_window.len(), FRAME_SIZE);
         let mut out_samples = Vec::with_capacity(FRAME_SIZE);
 
         let mut frame = Frames::from_samples(&sliding_window);
         let (conditioning, state) = self.frame_level_rnn.forward(&frame, state, debug_mode);
 
         for _ in 0..FRAME_SIZE {
-            let logits = self.sample_predictor.forward(&conditioning, &frame);
+            let logits = self.sample_predictor.forward(&conditioning, &frame.tensor);
 
-            let sample = logits
-                .squeeze_dim(0)
-                .softmax(-1, Kind::Float)
-                .multinomial(1, false);
-            assert_shape(&[1, 1], &sample);
+            assert_shape(&[1, 1, QUANTIZATION], &logits);
+            let sample = reshape(&[QUANTIZATION], &logits);
+            let sample = sample.softmax(-1, Kind::Float).multinomial(1, false);
+            assert_shape(&[1], &sample);
             let sample = i64::from(sample);
 
             sliding_window.remove(0);
             sliding_window.push(sample);
+            assert_eq!(sliding_window.len(), FRAME_SIZE);
 
             frame = Frames::from_samples(&sliding_window);
             out_samples.push(sample);
@@ -324,9 +331,10 @@ impl NeuralNet {
             .frame_level_rnn
             .forward(&frame, &zero_state, debug_mode);
 
-        let logits = self.sample_predictor.forward(&conditioning, &frame);
-
-        let unfold_size = frame.num_frames * FRAME_SIZE - FRAME_SIZE + 1;
+        let (unfolded_frame, unfold_size) = frame.unfold();
+        let logits = self
+            .sample_predictor
+            .forward(&conditioning, &unfolded_frame);
 
         assert_shape(&[BATCH_SIZE, unfold_size, QUANTIZATION], &logits);
 
