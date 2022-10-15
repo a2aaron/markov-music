@@ -13,11 +13,11 @@ thread_local! {
 }
 
 // Size of batches
-pub const BATCH_SIZE: usize = 1;
+pub const BATCH_SIZE: usize = 128;
 // Length of BPTT sequence, in frames
 pub const NUM_FRAMES: usize = 16;
 // Size of frame, in samples
-pub const FRAME_SIZE: usize = 15;
+pub const FRAME_SIZE: usize = 16;
 // Length of BPTT sequence, in samples (how long is a sequence during backprop)
 pub const SEQ_LEN: usize = NUM_FRAMES * FRAME_SIZE;
 // Quantization level (256 = 8 bit)
@@ -113,6 +113,16 @@ impl Frames {
             frame_size,
         }
     }
+
+    fn from_samples(samples: &[i64]) -> Frames {
+        let tensor = Tensor::of_slice(samples);
+        let tensor = reshape(&[1, 1, samples.len()], &tensor);
+        Frames::new(tensor, 1, 1, samples.len())
+    }
+
+    pub fn samples(&self) -> Vec<i64> {
+        Vec::<i64>::from(&self.tensor)
+    }
 }
 
 pub struct FrameLevelRNN {
@@ -138,9 +148,9 @@ impl FrameLevelRNN {
         state: &LSTMState,
         debug_mode: bool,
     ) -> (ConditioningVector, LSTMState) {
+        let batch_size = frame.batch_size;
+        let num_frames = frame.num_frames;
         let frame = &frame.tensor;
-        let batch_size = frame.size()[0] as usize;
-        let num_frames = frame.size()[1] as usize;
         assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
 
         let frame = frame.to_kind(Kind::Float);
@@ -274,28 +284,33 @@ impl NeuralNet {
 
     pub fn forward(
         &self,
-        frame: &Frames,
+        mut sliding_window: Vec<i64>,
         state: &LSTMState,
         debug_mode: bool,
-    ) -> (Frames, LSTMState) {
-        let (conditioning, state) = self.frame_level_rnn.forward(frame, state, debug_mode);
-        let logits = self.sample_predictor.forward(&conditioning, &frame);
-        let samples = logits
-            .squeeze_dim(0)
-            .softmax(-1, Kind::Float)
-            .multinomial(1, false);
-        if debug_mode {
-            println!("====== NEURALNET::FORWARDS ======");
-            debug_tensor(&frame.tensor, "frame_int");
-            let samples = reshape(&[1, FRAME_SIZE], &samples);
-            debug_tensor(&samples, "samples_out");
+    ) -> (Vec<i64>, LSTMState) {
+        let mut out_samples = Vec::with_capacity(FRAME_SIZE);
+
+        let mut frame = Frames::from_samples(&sliding_window);
+        let (conditioning, state) = self.frame_level_rnn.forward(&frame, state, debug_mode);
+
+        for _ in 0..FRAME_SIZE {
+            let logits = self.sample_predictor.forward(&conditioning, &frame);
+
+            let sample = logits
+                .squeeze_dim(0)
+                .softmax(-1, Kind::Float)
+                .multinomial(1, false);
+            assert_shape(&[1, 1], &sample);
+            let sample = i64::from(sample);
+
+            sliding_window.remove(0);
+            sliding_window.push(sample);
+
+            frame = Frames::from_samples(&sliding_window);
+            out_samples.push(sample);
         }
 
-        let samples = reshape(&[frame.batch_size, 1, frame.frame_size], &samples);
-        (
-            Frames::new(samples, frame.batch_size, 1, frame.frame_size),
-            state,
-        )
+        (out_samples, state)
     }
 
     pub fn backward(&mut self, frame: &Frames, targets: &Frames, debug_mode: bool) -> f32 {
@@ -314,11 +329,11 @@ impl NeuralNet {
         let seq_len = SEQ_LEN as i64;
         let quantization = QUANTIZATION as i64;
 
-        let logits_view = logits.view([batch_size * unfold_size as i64, quantization]);
+        let logits_view = logits.reshape(&[batch_size * unfold_size as i64, quantization]);
 
-        let targets = targets.tensor.view([batch_size, seq_len]);
+        let targets = targets.tensor.reshape(&[batch_size, seq_len]);
         let targets = targets.narrow(1, 0, unfold_size as i64);
-        let targets = targets.view([batch_size * unfold_size as i64]);
+        let targets = targets.reshape(&[batch_size * unfold_size as i64]);
 
         if debug_mode {
             println!("====== NEURALNET::BACKWARDS ======");

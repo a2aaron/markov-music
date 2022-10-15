@@ -247,14 +247,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, signal: &Audio) {
     let (_, mut state) = network.zeros(1);
-    let mut frame = Audio::debug_batch(1, 1, FRAME_SIZE).0;
+    let mut frame = signal.batch(1, 1, FRAME_SIZE).0.samples();
     let mut samples = Vec::with_capacity(length);
+    samples.extend(frame.iter());
     println!("Generating {} samples...", length);
     while samples.len() < length {
-        let (next_samples, next_state) = network.forward(&frame, &state, samples.len() == 0);
+        let (next_frame, next_state) = network.forward(frame, &state, false);
         state = next_state;
-        samples.extend(Vec::<i64>::from(&next_samples.tensor));
-        frame = next_samples;
+        samples.extend(next_frame.iter());
+        frame = next_frame;
 
         if samples.len() % (length / 10).max(10_000) == 0 {
             println!("Generating... ({:?} / {})", samples.len(), length)
