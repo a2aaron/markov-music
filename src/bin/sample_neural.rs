@@ -3,22 +3,13 @@ use std::error::Error;
 use clap::{command, Parser};
 use itertools::Itertools;
 use markov_music::neural2::{
-    assert_shape, reshape, NeuralNet, BATCH_SIZE, FRAME_SIZE, NUM_FRAMES, QUANTIZATION,
+    assert_shape, reshape, write_csv, NeuralNet, BATCH_SIZE, FRAME_SIZE, NUM_FRAMES, QUANTIZATION,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tch::{nn, Device, IndexOp, Tensor};
 
 mod util;
-
-macro_rules! print_tensor {
-    ($var:ident) => {
-        let header = format!("=== {}: (shape = {:?}) ===", stringify!($var), $var.size());
-        println!("{}", header);
-        $var.print();
-        println!("{:=<1$}", "", header.len());
-    };
-}
 
 #[derive(Parser, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[command(author, version, about, long_about = None)]
@@ -35,9 +26,27 @@ struct Args {
     length: usize,
     #[arg(long, default_value_t = 10)]
     generate_every: usize,
+    #[arg(long, default_value_t = 100)]
+    max_epoch: usize,
     /// If passed, allows settings to be updated each epoch via a text file
     #[arg(long)]
     settings_file: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    debug_mode: usize,
+    // #[arg(long, default_value_t = 128)]
+    // batch_size: usize,
+    // #[arg(long, default_value_t = 128)]
+    // frame_size: usize,
+    // #[arg(long, default_value_t = 128)]
+    // num_frames: usize,
+    // #[arg(long, default_value_t = 128)]
+    // hidden_size: usize,
+    // #[arg(long, default_value_t = 128)]
+    // n_rnn: usize,
+    // #[arg(long, default_value_t = 128)]
+    // embed_size: usize,
+    // #[arg(long, default_value_t = 128)]
+    // quantization: usize,
 }
 
 impl Args {
@@ -50,7 +59,6 @@ impl Args {
 
 struct Audio {
     audio: Tensor,
-    // audio_onehot: Tensor,
     min: f32,
     max: f32,
     rounded_min: i64,
@@ -79,10 +87,8 @@ impl Audio {
         assert!(audio.iter().all(|x| 0 <= *x && *x < QUANTIZATION as i64));
 
         let audio = Tensor::of_slice(&audio);
-        // let audio_onehot = audio.onehot(QUANTIZATION as i64);
         Audio {
             audio,
-            // audio_onehot,
             min,
             max,
             rounded_min,
@@ -180,9 +186,12 @@ impl Audio {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    std::env::set_var("RUST_BACKTRACE", "1");
-
     let mut args = Args::parse();
+    match args.debug_mode {
+        1 => std::env::set_var("RUST_BACKTRACE", "1"),
+        2 => std::env::set_var("RUST_BACKTRACE", "full"),
+        _ => (),
+    }
 
     let (signal, _, sample_rate) = util::read_file(&args.in_path)?;
     let signal = Audio::new(&signal, sample_rate);
@@ -196,14 +205,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vs = nn::VarStore::new(device);
 
     let mut network = NeuralNet::new(&vs, device);
-    for epoch_i in 0..201 {
-        // let (frames, targets) = signal.batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
-        let (frames, targets) = Audio::debug_batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
+    let mut losses = vec![];
+    for epoch_i in 0..=args.max_epoch {
+        let (frames, targets) = signal.batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
+        // let (frames, targets) = Audio::debug_batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
 
-        let loss = network.backward(&frames, &targets);
+        let loss = network.backward(
+            &frames,
+            &targets,
+            args.debug_mode != 0 && (epoch_i == 0 || epoch_i == args.max_epoch),
+        );
 
-        if epoch_i != 0 && epoch_i % args.generate_every == 0 {
-            println!("Epoch {}, loss = {:.5}", epoch_i, loss);
+        println!("Epoch {}, loss = {:.8}", epoch_i, loss);
+        losses.push(loss);
+        if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
             generate(&args.out_path, epoch_i, length, &network, &signal);
         }
 
@@ -219,12 +234,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    write_csv("outputs/losses.csv", &[losses]);
     Ok(())
 }
 
 fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, signal: &Audio) {
-    let (mut frame, mut state) = network.zeros(1);
-    frame = Audio::debug_batch(1, 1, FRAME_SIZE).0;
+    let (_, mut state) = network.zeros(1);
+    let mut frame = Audio::debug_batch(1, 1, FRAME_SIZE).0;
     let mut samples = Vec::with_capacity(length);
     println!("Generating {} samples...", length);
     while samples.len() < length {

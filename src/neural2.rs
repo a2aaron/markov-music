@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use itertools::Itertools;
 use tch::{
     nn::{
@@ -6,13 +8,16 @@ use tch::{
     },
     Device, Kind, Tensor,
 };
+thread_local! {
+    pub static EPOCH_I: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
+}
 
 // Size of batches
 pub const BATCH_SIZE: usize = 1;
 // Length of BPTT sequence, in frames
 pub const NUM_FRAMES: usize = 16;
 // Size of frame, in samples
-pub const FRAME_SIZE: usize = 16;
+pub const FRAME_SIZE: usize = 15;
 // Length of BPTT sequence, in samples (how long is a sequence during backprop)
 pub const SEQ_LEN: usize = NUM_FRAMES * FRAME_SIZE;
 // Quantization level (256 = 8 bit)
@@ -20,7 +25,7 @@ pub const QUANTIZATION: usize = 256;
 
 // Hidden size of the LSTM
 // Databots recommended value: 1024?
-pub const HIDDEN_SIZE: usize = 32;
+pub const HIDDEN_SIZE: usize = 256;
 // Number of RNNs layers to stack in the LSTM
 pub const N_RNN: usize = 1;
 // Embedding size (embedding is like one-hot encoding, but
@@ -28,13 +33,43 @@ pub const N_RNN: usize = 1;
 // Maybe this can be removed when EMBED_SIZE == QUANTIZATION?
 pub const EMBED_SIZE: usize = 256;
 
-macro_rules! print_tensor {
+macro_rules! debug_tensor {
     ($var:ident) => {
-        let header = format!("=== {}: (shape = {:?}) ===", stringify!($var), $var.size());
-        println!("{}", header);
-        $var.print();
-        println!("{:=<1$}", "", header.len());
+        let epoch = EPOCH_I.with(|i| *i.borrow());
+        let name = stringify!($var);
+        let line = line!();
+
+        // print_tensor(&$var, name, line, epoch);
+        let file_name = format!("outputs/{}_line_{}_epoch_{}.csv", name, line, epoch);
+        write_tensor(&file_name, &$var);
     };
+}
+
+pub fn print_tensor(tensor: &Tensor, tensor_name: &str, line: u32, epoch: usize) {
+    let header = format!(
+        "=== {} (line {}, epoch {}): (shape = {:?}) ===",
+        tensor_name,
+        line,
+        epoch,
+        tensor.size()
+    );
+    println!("{}", header);
+    tensor.print();
+}
+
+fn write_tensor(file_name: &str, data: &Tensor) {
+    let shape: Vec<f32> = data.size().into_iter().map(|x| x as f32).collect();
+    let data: Vec<f32> = data.into();
+    write_csv(file_name, &[shape, data]);
+}
+
+pub fn write_csv(file_name: &str, data: &[Vec<f32>]) {
+    let mut file = std::fs::File::create(file_name).unwrap();
+    let data = data
+        .iter()
+        .map(|x| x.iter().map(|x| x.to_string()).join(","))
+        .join(",\n");
+    file.write(data.as_bytes()).unwrap();
 }
 
 pub struct FrameLevelRNN {
@@ -54,7 +89,7 @@ impl FrameLevelRNN {
         FrameLevelRNN { lstm, linear }
     }
 
-    fn forward(&self, frame: &Tensor, state: &LSTMState) -> (Tensor, LSTMState) {
+    fn forward(&self, frame: &Tensor, state: &LSTMState, debug_mode: bool) -> (Tensor, LSTMState) {
         let batch_size = frame.size()[0] as usize;
         let num_frames = frame.size()[1] as usize;
         assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
@@ -67,6 +102,12 @@ impl FrameLevelRNN {
 
         let (conditioning, state) = self.lstm.seq_init(&frame, state);
         assert_shape(&[batch_size, num_frames, HIDDEN_SIZE], &conditioning);
+
+        if debug_mode {
+            println!("====== FRAMELEVELRNN::FORWARDS ======");
+            debug_tensor!(frame);
+            debug_tensor!(conditioning);
+        }
 
         let conditioning = self.linear.forward(&conditioning);
         assert_shape(
@@ -177,30 +218,29 @@ impl NeuralNet {
         state: &LSTMState,
         debug_mode: bool,
     ) -> (Tensor, LSTMState) {
-        let (conditioning, state) = self.frame_level_rnn.forward(frame, state);
+        let (conditioning, state) = self.frame_level_rnn.forward(frame, state, debug_mode);
         let logits = self.sample_predictor.forward(&conditioning, &frame);
         let samples = logits
             .squeeze_dim(0)
             .softmax(-1, Kind::Float)
             .multinomial(1, false);
         if debug_mode {
-            print_tensor!(frame);
-            // let state_c = state.c();
-            // print_tensor!(state_c);
-            // print_tensor!(conditioning);
-            // print_tensor!(logits);
+            println!("====== NEURALNET::FORWARDS ======");
+            debug_tensor!(frame);
             let samples = reshape(&[1, FRAME_SIZE], &samples);
-            print_tensor!(samples);
+            debug_tensor!(samples);
         }
         (samples, state)
     }
 
-    pub fn backward(&mut self, frame: &Tensor, targets: &Tensor) -> f32 {
+    pub fn backward(&mut self, frame: &Tensor, targets: &Tensor, debug_mode: bool) -> f32 {
         assert_shape(&[BATCH_SIZE, NUM_FRAMES, FRAME_SIZE], &frame);
         assert_shape(&[BATCH_SIZE, NUM_FRAMES, FRAME_SIZE], &targets);
 
         let zero_state = self.zeros(BATCH_SIZE).1;
-        let (conditioning, _) = self.frame_level_rnn.forward(&frame, &zero_state);
+        let (conditioning, _) = self
+            .frame_level_rnn
+            .forward(&frame, &zero_state, debug_mode);
 
         let logits = self.sample_predictor.forward(&conditioning, &frame);
 
@@ -213,13 +253,21 @@ impl NeuralNet {
         let seq_len = SEQ_LEN as i64;
         let quantization = QUANTIZATION as i64;
 
-        let logits = logits.view([batch_size * seq_len, quantization]);
+        let logits_view = logits.view([batch_size * seq_len, quantization]);
         let targets_view = targets.view([batch_size * seq_len]);
 
-        let loss = logits.cross_entropy_for_logits(&targets_view);
+        if debug_mode {
+            println!("====== NEURALNET::BACKWARDS ======");
+            debug_tensor!(frame);
+            debug_tensor!(targets);
+            debug_tensor!(logits);
+        }
+
+        let loss = logits_view.cross_entropy_for_logits(&targets_view);
 
         self.optim.backward_step_clip(&loss, 0.5);
 
+        EPOCH_I.with(|i| *i.borrow_mut() += 1);
         f32::from(loss)
     }
 }
