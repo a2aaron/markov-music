@@ -7,24 +7,35 @@ use tch::{
     Device, Kind, Tensor,
 };
 
-// Hidden size of the LSTM
-pub const HIDDEN_SIZE: usize = 256; // Databots value: 1024?
-pub const BATCH_SIZE: usize = 128;
+// Size of batches
+pub const BATCH_SIZE: usize = 1;
 // Length of BPTT sequence, in frames
 pub const NUM_FRAMES: usize = 16;
+// Size of frame, in samples
+pub const FRAME_SIZE: usize = 16;
 // Length of BPTT sequence, in samples (how long is a sequence during backprop)
 pub const SEQ_LEN: usize = NUM_FRAMES * FRAME_SIZE;
 // Quantization level (256 = 8 bit)
 pub const QUANTIZATION: usize = 256;
 
+// Hidden size of the LSTM
+// Databots recommended value: 1024?
+pub const HIDDEN_SIZE: usize = 32;
 // Number of RNNs layers to stack in the LSTM
 pub const N_RNN: usize = 1;
-// Size of frame, in samples
-pub const FRAME_SIZE: usize = 16;
 // Embedding size (embedding is like one-hot encoding, but
 // denser--network learns how to translate QUANTIZATION symbols into EMBED_SIZE dim vector)
 // Maybe this can be removed when EMBED_SIZE == QUANTIZATION?
 pub const EMBED_SIZE: usize = 256;
+
+macro_rules! print_tensor {
+    ($var:ident) => {
+        let header = format!("=== {}: (shape = {:?}) ===", stringify!($var), $var.size());
+        println!("{}", header);
+        $var.print();
+        println!("{:=<1$}", "", header.len());
+    };
+}
 
 pub struct FrameLevelRNN {
     lstm: nn::LSTM,
@@ -48,7 +59,6 @@ impl FrameLevelRNN {
         let num_frames = frame.size()[1] as usize;
         assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
 
-        // TODO: This probably need to be in range [-2.0, 2.0] as described in the code.
         let frame = frame.to_kind(Kind::Float);
         let frame = frame
             .divide_scalar((QUANTIZATION / 2) as f64)
@@ -161,13 +171,27 @@ impl NeuralNet {
         (frame, state)
     }
 
-    pub fn forward(&self, frame: &Tensor, state: &LSTMState) -> (Tensor, LSTMState) {
+    pub fn forward(
+        &self,
+        frame: &Tensor,
+        state: &LSTMState,
+        debug_mode: bool,
+    ) -> (Tensor, LSTMState) {
         let (conditioning, state) = self.frame_level_rnn.forward(frame, state);
         let logits = self.sample_predictor.forward(&conditioning, &frame);
         let samples = logits
             .squeeze_dim(0)
             .softmax(-1, Kind::Float)
             .multinomial(1, false);
+        if debug_mode {
+            print_tensor!(frame);
+            // let state_c = state.c();
+            // print_tensor!(state_c);
+            // print_tensor!(conditioning);
+            // print_tensor!(logits);
+            let samples = reshape(&[1, FRAME_SIZE], &samples);
+            print_tensor!(samples);
+        }
         (samples, state)
     }
 
@@ -190,9 +214,9 @@ impl NeuralNet {
         let quantization = QUANTIZATION as i64;
 
         let logits = logits.view([batch_size * seq_len, quantization]);
-        let targets = targets.view([batch_size * seq_len]);
+        let targets_view = targets.view([batch_size * seq_len]);
 
-        let loss = logits.cross_entropy_for_logits(&targets);
+        let loss = logits.cross_entropy_for_logits(&targets_view);
 
         self.optim.backward_step_clip(&loss, 0.5);
 

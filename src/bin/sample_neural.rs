@@ -11,6 +11,15 @@ use tch::{nn, Device, IndexOp, Tensor};
 
 mod util;
 
+macro_rules! print_tensor {
+    ($var:ident) => {
+        let header = format!("=== {}: (shape = {:?}) ===", stringify!($var), $var.size());
+        println!("{}", header);
+        $var.print();
+        println!("{:=<1$}", "", header.len());
+    };
+}
+
 #[derive(Parser, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[command(author, version, about, long_about = None)]
 /// A WAV file generator powered by markov chain.
@@ -124,12 +133,49 @@ impl Audio {
         (input, targets)
     }
 
+    fn debug_batch(batch_size: usize, num_frames: usize, frame_size: usize) -> (Tensor, Tensor) {
+        let total_elements = batch_size * num_frames * frame_size;
+        let input = (0..)
+            .take(total_elements)
+            .map(|i| (i % QUANTIZATION) as i64)
+            .collect::<Vec<_>>();
+        let targets = (0..)
+            .take(total_elements)
+            .map(|i| ((i + 1) % QUANTIZATION) as i64)
+            .collect::<Vec<_>>();
+
+        let input = Tensor::of_slice(&input);
+        let targets = Tensor::of_slice(&targets);
+
+        let input = reshape(&[batch_size, num_frames, frame_size], &input);
+        let targets = reshape(&[batch_size, num_frames, frame_size], &targets);
+
+        (input, targets)
+    }
+
     fn write_to_file(&self, name: &str, audio: &[i64]) {
         let samples = self.unnormalize(audio);
         let samples = samples.iter().map(|x| *x as i16).collect_vec();
         let samples = samples.iter().map(|x| *x as i16).collect_vec();
 
+        let mut partials = vec![vec![]; FRAME_SIZE];
+
+        for chunk in &samples.clone().into_iter().chunks(FRAME_SIZE) {
+            for (i, sample) in chunk.enumerate() {
+                partials[i].push(sample);
+            }
+        }
+
+        let samples_alt = partials.into_iter().flatten().collect_vec();
+
         util::write_wav(name, self.sample_rate, &samples, None).unwrap();
+        util::write_wav(
+            format!("alt_{}", name),
+            self.sample_rate,
+            &samples_alt,
+            None,
+        )
+        .unwrap();
     }
 }
 
@@ -150,12 +196,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vs = nn::VarStore::new(device);
 
     let mut network = NeuralNet::new(&vs, device);
-    for epoch_i in 0.. {
-        let (frames, targets) = signal.batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
+    for epoch_i in 0..201 {
+        // let (frames, targets) = signal.batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
+        let (frames, targets) = Audio::debug_batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
+
         let loss = network.backward(&frames, &targets);
-        println!("Epoch {}, loss = {:.5}", epoch_i, loss);
 
         if epoch_i != 0 && epoch_i % args.generate_every == 0 {
+            println!("Epoch {}, loss = {:.5}", epoch_i, loss);
             generate(&args.out_path, epoch_i, length, &network, &signal);
         }
 
@@ -176,12 +224,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, signal: &Audio) {
     let (mut frame, mut state) = network.zeros(1);
+    frame = Audio::debug_batch(1, 1, FRAME_SIZE).0;
     let mut samples = Vec::with_capacity(length);
     println!("Generating {} samples...", length);
     while samples.len() < length {
-        let (next_samples, next_state) = network.forward(&frame, &state);
+        let (next_samples, next_state) = network.forward(&frame, &state, samples.len() == 0);
         state = next_state;
-        samples.extend(Vec::<f32>::from(&next_samples).iter().map(|x| *x as i64));
+        samples.extend(Vec::<i64>::from(&next_samples));
         frame = reshape(&[1, 1, FRAME_SIZE], &next_samples);
 
         if samples.len() % (length / 10).max(10_000) == 0 {
