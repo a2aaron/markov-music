@@ -3,7 +3,8 @@ use std::error::Error;
 use clap::{command, Parser};
 use itertools::Itertools;
 use markov_music::neural2::{
-    assert_shape, reshape, write_csv, NeuralNet, BATCH_SIZE, FRAME_SIZE, NUM_FRAMES, QUANTIZATION,
+    assert_shape, reshape, write_csv, Frames, NeuralNet, BATCH_SIZE, FRAME_SIZE, NUM_FRAMES,
+    QUANTIZATION,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -110,7 +111,7 @@ impl Audio {
             .collect_vec()
     }
 
-    fn batch(&self, batch_size: usize, num_frames: usize, frame_size: usize) -> (Tensor, Tensor) {
+    fn batch(&self, batch_size: usize, num_frames: usize, frame_size: usize) -> (Frames, Frames) {
         let seq_len = num_frames * frame_size;
         let (input, targets): (Vec<_>, Vec<_>) = (0..batch_size)
             .map(|_| {
@@ -136,10 +137,13 @@ impl Audio {
         assert_shape(&[batch_size, num_frames, frame_size], &input);
         assert_shape(&[batch_size, num_frames, frame_size], &targets);
 
-        (input, targets)
+        (
+            Frames::new(input, batch_size, num_frames, frame_size),
+            Frames::new(targets, batch_size, num_frames, frame_size),
+        )
     }
 
-    fn debug_batch(batch_size: usize, num_frames: usize, frame_size: usize) -> (Tensor, Tensor) {
+    fn debug_batch(batch_size: usize, num_frames: usize, frame_size: usize) -> (Frames, Frames) {
         let total_elements = batch_size * num_frames * frame_size;
         let input = (0..)
             .take(total_elements)
@@ -156,7 +160,10 @@ impl Audio {
         let input = reshape(&[batch_size, num_frames, frame_size], &input);
         let targets = reshape(&[batch_size, num_frames, frame_size], &targets);
 
-        (input, targets)
+        (
+            Frames::new(input, batch_size, num_frames, frame_size),
+            Frames::new(targets, batch_size, num_frames, frame_size),
+        )
     }
 
     fn write_to_file(&self, name: &str, audio: &[i64]) {
@@ -246,8 +253,8 @@ fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, sign
     while samples.len() < length {
         let (next_samples, next_state) = network.forward(&frame, &state, samples.len() == 0);
         state = next_state;
-        samples.extend(Vec::<i64>::from(&next_samples));
-        frame = reshape(&[1, 1, FRAME_SIZE], &next_samples);
+        samples.extend(Vec::<i64>::from(&next_samples.tensor));
+        frame = next_samples;
 
         if samples.len() % (length / 10).max(10_000) == 0 {
             println!("Generating... ({:?} / {})", samples.len(), length)

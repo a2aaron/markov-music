@@ -33,16 +33,11 @@ pub const N_RNN: usize = 1;
 // Maybe this can be removed when EMBED_SIZE == QUANTIZATION?
 pub const EMBED_SIZE: usize = 256;
 
-macro_rules! debug_tensor {
-    ($var:ident) => {
-        let epoch = EPOCH_I.with(|i| *i.borrow());
-        let name = stringify!($var);
-        let line = line!();
-
-        // print_tensor(&$var, name, line, epoch);
-        let file_name = format!("outputs/{}_line_{}_epoch_{}.csv", name, line, epoch);
-        write_tensor(&file_name, &$var);
-    };
+fn debug_tensor(tensor: &Tensor, name: &str) {
+    let epoch = EPOCH_I.with(|i| *i.borrow());
+    // print_tensor(&$var, name, line, epoch);
+    let file_name = format!("outputs/{}_epoch_{}.csv", name, epoch);
+    write_tensor(&file_name, tensor);
 }
 
 pub fn print_tensor(tensor: &Tensor, tensor_name: &str, line: u32, epoch: usize) {
@@ -72,6 +67,35 @@ pub fn write_csv(file_name: &str, data: &[Vec<f32>]) {
     file.write(data.as_bytes()).unwrap();
 }
 
+pub struct ConditioningVector(pub Tensor);
+impl ConditioningVector {
+    pub fn new(conditioning: Tensor, batch_size: usize, num_frames: usize) -> ConditioningVector {
+        assert_shape(
+            &[batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE],
+            &conditioning,
+        );
+        ConditioningVector(conditioning)
+    }
+}
+
+pub struct Frames {
+    pub tensor: Tensor,
+    batch_size: usize,
+    num_frames: usize,
+    frame_size: usize,
+}
+impl Frames {
+    pub fn new(frames: Tensor, batch_size: usize, num_frames: usize, frame_size: usize) -> Frames {
+        assert_shape(&[batch_size, num_frames, frame_size], &frames);
+        Frames {
+            tensor: frames,
+            batch_size,
+            num_frames,
+            frame_size,
+        }
+    }
+}
+
 pub struct FrameLevelRNN {
     lstm: nn::LSTM,
     linear: nn::Linear,
@@ -89,7 +113,13 @@ impl FrameLevelRNN {
         FrameLevelRNN { lstm, linear }
     }
 
-    fn forward(&self, frame: &Tensor, state: &LSTMState, debug_mode: bool) -> (Tensor, LSTMState) {
+    fn forward(
+        &self,
+        frame: &Frames,
+        state: &LSTMState,
+        debug_mode: bool,
+    ) -> (ConditioningVector, LSTMState) {
+        let frame = &frame.tensor;
         let batch_size = frame.size()[0] as usize;
         let num_frames = frame.size()[1] as usize;
         assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
@@ -105,8 +135,8 @@ impl FrameLevelRNN {
 
         if debug_mode {
             println!("====== FRAMELEVELRNN::FORWARDS ======");
-            debug_tensor!(frame);
-            debug_tensor!(conditioning);
+            debug_tensor(&frame, "frame_float");
+            debug_tensor(&conditioning, "conditioning");
         }
 
         let conditioning = self.linear.forward(&conditioning);
@@ -119,7 +149,10 @@ impl FrameLevelRNN {
             &[batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE],
             &conditioning,
         );
-        (conditioning, state)
+        (
+            ConditioningVector::new(conditioning, batch_size, num_frames),
+            state,
+        )
     }
 }
 
@@ -158,22 +191,19 @@ impl SamplePredictor {
         }
     }
 
-    fn forward(&self, conditioning: &Tensor, frame: &Tensor) -> Tensor {
+    fn forward(&self, conditioning: &ConditioningVector, frame: &Frames) -> Tensor {
+        let frame = &frame.tensor;
         let batch_size = frame.size()[0] as usize;
         let num_frames = frame.size()[1] as usize;
 
         assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
-        assert_shape(
-            &[batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE],
-            &conditioning,
-        );
 
-        let frame = self.embed.forward(frame);
+        let frame = self.embed.forward(&frame);
         assert_shape(&[batch_size, num_frames, FRAME_SIZE, EMBED_SIZE], &frame);
 
         let frame = reshape(&[batch_size, num_frames * FRAME_SIZE, EMBED_SIZE], &frame);
         let mut out = self.linear_1.forward(&frame);
-        out += conditioning;
+        out += &conditioning.0;
         let out = self.linear_2.forward(&out);
         let out = out.relu();
         let out = self.linear_3.forward(&out);
@@ -214,10 +244,10 @@ impl NeuralNet {
 
     pub fn forward(
         &self,
-        frame: &Tensor,
+        frame: &Frames,
         state: &LSTMState,
         debug_mode: bool,
-    ) -> (Tensor, LSTMState) {
+    ) -> (Frames, LSTMState) {
         let (conditioning, state) = self.frame_level_rnn.forward(frame, state, debug_mode);
         let logits = self.sample_predictor.forward(&conditioning, &frame);
         let samples = logits
@@ -226,17 +256,19 @@ impl NeuralNet {
             .multinomial(1, false);
         if debug_mode {
             println!("====== NEURALNET::FORWARDS ======");
-            debug_tensor!(frame);
+            debug_tensor(&frame.tensor, "frame_int");
             let samples = reshape(&[1, FRAME_SIZE], &samples);
-            debug_tensor!(samples);
+            debug_tensor(&samples, "samples_out");
         }
-        (samples, state)
+
+        let samples = reshape(&[frame.batch_size, 1, frame.frame_size], &samples);
+        (
+            Frames::new(samples, frame.batch_size, 1, frame.frame_size),
+            state,
+        )
     }
 
-    pub fn backward(&mut self, frame: &Tensor, targets: &Tensor, debug_mode: bool) -> f32 {
-        assert_shape(&[BATCH_SIZE, NUM_FRAMES, FRAME_SIZE], &frame);
-        assert_shape(&[BATCH_SIZE, NUM_FRAMES, FRAME_SIZE], &targets);
-
+    pub fn backward(&mut self, frame: &Frames, targets: &Frames, debug_mode: bool) -> f32 {
         let zero_state = self.zeros(BATCH_SIZE).1;
         let (conditioning, _) = self
             .frame_level_rnn
@@ -254,13 +286,13 @@ impl NeuralNet {
         let quantization = QUANTIZATION as i64;
 
         let logits_view = logits.view([batch_size * seq_len, quantization]);
-        let targets_view = targets.view([batch_size * seq_len]);
+        let targets_view = targets.tensor.view([batch_size * seq_len]);
 
         if debug_mode {
             println!("====== NEURALNET::BACKWARDS ======");
-            debug_tensor!(frame);
-            debug_tensor!(targets);
-            debug_tensor!(logits);
+            debug_tensor(&frame.tensor, "frame_back");
+            debug_tensor(&targets.tensor, "targets_back");
+            debug_tensor(&logits, "logits_back");
         }
 
         let loss = logits_view.cross_entropy_for_logits(&targets_view);
