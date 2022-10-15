@@ -217,7 +217,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let (frames, targets) = signal.batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
         // let (frames, targets) = Audio::debug_batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
 
-        let loss = network.backward(
+        let (loss, logits, target_reshape) = network.backward(
             &frames,
             &targets,
             args.debug_mode != 0 && (epoch_i == 0 || epoch_i == args.max_epoch),
@@ -226,6 +226,38 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("Epoch {}, loss = {:.8}", epoch_i, loss);
         losses.push(loss);
         if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
+            signal.write_to_file(
+                &format!("{}_target{}.wav", &args.out_path, epoch_i),
+                &frames.samples(),
+            );
+            signal.write_to_file(
+                &format!("{}_input{}.wav", &args.out_path, epoch_i),
+                &targets.samples(),
+            );
+            signal.write_to_file(
+                &format!("{}_target_reshape{}.wav", &args.out_path, epoch_i),
+                &Vec::<i64>::from(&target_reshape),
+            );
+
+            let mut logits_sampled = vec![];
+            for i in 0..logits.size()[0] {
+                for j in 0..logits.size()[1] {
+                    let logit = logits.i((i, j));
+                    assert_shape(&[QUANTIZATION], &logit);
+                    let softmax = logit.softmax(-1, tch::Kind::Float);
+                    // println!("{} {} {:?} {:?}", i, j, logit.size(), softmax.size());
+                    let sample = softmax.multinomial(1, false);
+                    assert_shape(&[1], &sample);
+                    let sample = i64::from(sample);
+                    logits_sampled.push(sample);
+                }
+            }
+            // println!("{:?}", logits.size());
+            signal.write_to_file(
+                &format!("{}_logits_sampled{}.wav", &args.out_path, epoch_i),
+                &logits_sampled,
+            );
+
             generate(&args.out_path, epoch_i, length, &network, &signal);
         }
 
