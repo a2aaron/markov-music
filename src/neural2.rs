@@ -67,14 +67,33 @@ pub fn write_csv(file_name: &str, data: &[Vec<f32>]) {
     file.write(data.as_bytes()).unwrap();
 }
 
-pub struct ConditioningVector(pub Tensor);
+/// Wrapper for the conditioning vector. Has shape [batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE]
+pub struct ConditioningVector {
+    pub tensor: Tensor,
+    batch_size: usize,
+    num_frames: usize,
+}
 impl ConditioningVector {
     pub fn new(conditioning: Tensor, batch_size: usize, num_frames: usize) -> ConditioningVector {
         assert_shape(
             &[batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE],
             &conditioning,
         );
-        ConditioningVector(conditioning)
+        ConditioningVector {
+            tensor: conditioning,
+            batch_size,
+            num_frames,
+        }
+    }
+
+    // Shorten the conditioning vector along the sample dimension. The output vector has shape
+    // [batch_size, shortened_size, HIDDEN_SIZE]
+    // Requires 0 < shortened_size && shortened_size <= self.num_frames * FRAME_SIZE
+    fn shorten_to(&self, shortened_size: usize) -> Tensor {
+        assert!(0 < shortened_size && shortened_size <= self.num_frames * FRAME_SIZE);
+        let short = self.tensor.narrow(1, 0, shortened_size as i64);
+        assert_shape(&[self.batch_size, shortened_size, HIDDEN_SIZE], &short);
+        short
     }
 }
 
@@ -173,11 +192,11 @@ impl SamplePredictor {
             EmbeddingConfig::default(),
         );
 
-        let linear_1 = linear(vs, EMBED_SIZE, HIDDEN_SIZE);
+        // let linear_1 = linear(vs, EMBED_SIZE, HIDDEN_SIZE);
         // I think the pytorch code is wrong--this should take in something of EMBED_SIZE, not FRAME_SIZE * EMBED_SIZE
         // Maybe this was supposed to be RATIO * EMBED_SIZE, where RATIO is the upscale/downscale
         // ratio between tiers?
-        // let linear_1 = linear(vs, FRAME_SIZE * EMBED_SIZE, HIDDEN_SIZE);
+        let linear_1 = linear(vs, FRAME_SIZE * EMBED_SIZE, HIDDEN_SIZE);
 
         let linear_2 = linear(vs, HIDDEN_SIZE, HIDDEN_SIZE);
         let linear_3 = linear(vs, HIDDEN_SIZE, HIDDEN_SIZE);
@@ -192,25 +211,36 @@ impl SamplePredictor {
     }
 
     fn forward(&self, conditioning: &ConditioningVector, frame: &Frames) -> Tensor {
+        let batch_size = frame.batch_size;
+        let num_frames = frame.num_frames;
         let frame = &frame.tensor;
-        let batch_size = frame.size()[0] as usize;
-        let num_frames = frame.size()[1] as usize;
 
-        assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
+        // Get a bunch of local sliding windows across the input sequence.
+        let frame = reshape(&[batch_size, num_frames * FRAME_SIZE], &frame);
+        let frame = frame.unfold(1, FRAME_SIZE as i64, 1);
+
+        let unfold_size = num_frames * FRAME_SIZE - FRAME_SIZE + 1;
+        assert_shape(&[batch_size, unfold_size, FRAME_SIZE], &frame);
 
         let frame = self.embed.forward(&frame);
-        assert_shape(&[batch_size, num_frames, FRAME_SIZE, EMBED_SIZE], &frame);
+        assert_shape(&[batch_size, unfold_size, FRAME_SIZE, EMBED_SIZE], &frame);
 
-        let frame = reshape(&[batch_size, num_frames * FRAME_SIZE, EMBED_SIZE], &frame);
+        let frame = reshape(&[batch_size, unfold_size, FRAME_SIZE * EMBED_SIZE], &frame);
+
         let mut out = self.linear_1.forward(&frame);
-        out += &conditioning.0;
+        let conditioning = conditioning.shorten_to(unfold_size);
+
+        assert_shape(&[batch_size, unfold_size, HIDDEN_SIZE], &out);
+        assert_shape(&[batch_size, unfold_size, HIDDEN_SIZE], &conditioning);
+
+        out += conditioning;
         let out = self.linear_2.forward(&out);
         let out = out.relu();
         let out = self.linear_3.forward(&out);
         let out = out.relu();
         let out = self.linear_out.forward(&out);
 
-        assert_shape(&[batch_size, num_frames * FRAME_SIZE, QUANTIZATION], &out);
+        assert_shape(&[batch_size, unfold_size, QUANTIZATION], &out);
 
         out
     }
@@ -276,26 +306,28 @@ impl NeuralNet {
 
         let logits = self.sample_predictor.forward(&conditioning, &frame);
 
-        assert_shape(
-            &[BATCH_SIZE, NUM_FRAMES * FRAME_SIZE, QUANTIZATION],
-            &logits,
-        );
+        let unfold_size = frame.num_frames * FRAME_SIZE - FRAME_SIZE + 1;
+
+        assert_shape(&[BATCH_SIZE, unfold_size, QUANTIZATION], &logits);
 
         let batch_size = BATCH_SIZE as i64;
         let seq_len = SEQ_LEN as i64;
         let quantization = QUANTIZATION as i64;
 
-        let logits_view = logits.view([batch_size * seq_len, quantization]);
-        let targets_view = targets.tensor.view([batch_size * seq_len]);
+        let logits_view = logits.view([batch_size * unfold_size as i64, quantization]);
+
+        let targets = targets.tensor.view([batch_size, seq_len]);
+        let targets = targets.narrow(1, 0, unfold_size as i64);
+        let targets = targets.view([batch_size * unfold_size as i64]);
 
         if debug_mode {
             println!("====== NEURALNET::BACKWARDS ======");
             debug_tensor(&frame.tensor, "frame_back");
-            debug_tensor(&targets.tensor, "targets_back");
+            debug_tensor(&targets, "targets_back");
             debug_tensor(&logits, "logits_back");
         }
 
-        let loss = logits_view.cross_entropy_for_logits(&targets_view);
+        let loss = logits_view.cross_entropy_for_logits(&targets);
 
         self.optim.backward_step_clip(&loss, 0.5);
 
@@ -324,6 +356,7 @@ pub fn reshape(shape: &[usize], tensor: &Tensor) -> Tensor {
     tensor.reshape(&shape)
 }
 
+#[track_caller]
 pub fn assert_shape(expected: &[usize], actual: &Tensor) {
     let actual = actual.size();
     let same_len = expected.len() == actual.len();
