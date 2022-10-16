@@ -115,9 +115,11 @@ impl Audio {
         let seq_len = num_frames * frame_size;
         let (input, targets): (Vec<_>, Vec<_>) = (0..batch_size)
             .map(|_| {
-                let i = rand::thread_rng().gen_range(0..(self.len - seq_len - 1)) as i64;
+                let i = rand::thread_rng().gen_range(0..(self.len - seq_len - frame_size)) as i64;
                 let input = self.audio.i(i..i + seq_len as i64);
-                let targets = self.audio.i((i + 1)..(i + 1) + seq_len as i64);
+                let targets = self
+                    .audio
+                    .i((i + frame_size as i64)..(i + frame_size as i64) + seq_len as i64);
 
                 assert_shape(&[seq_len], &input);
                 assert_shape(&[seq_len], &targets);
@@ -143,15 +145,21 @@ impl Audio {
         )
     }
 
-    fn debug_batch(batch_size: usize, num_frames: usize, frame_size: usize) -> (Frames, Frames) {
+    fn debug_batch(
+        &self,
+        batch_size: usize,
+        num_frames: usize,
+        frame_size: usize,
+    ) -> (Frames, Frames) {
         let total_elements = batch_size * num_frames * frame_size;
+        let i = rand::thread_rng().gen_range(0..100000) as i64;
         let input = (0..)
             .take(total_elements)
             .map(|i| (i % QUANTIZATION) as i64)
             .collect::<Vec<_>>();
         let targets = (0..)
             .take(total_elements)
-            .map(|i| ((i + 1) % QUANTIZATION) as i64)
+            .map(|i| ((i + frame_size) % QUANTIZATION) as i64)
             .collect::<Vec<_>>();
 
         let input = Tensor::of_slice(&input);
