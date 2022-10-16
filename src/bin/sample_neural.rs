@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{error::Error, time::Instant};
 
 use clap::{command, Parser};
 use itertools::Itertools;
@@ -148,26 +148,8 @@ impl Audio {
     fn write_to_file(&self, name: &str, audio: &[i64]) {
         let samples = self.unnormalize(audio);
         let samples = samples.iter().map(|x| *x as i16).collect_vec();
-        let samples = samples.iter().map(|x| *x as i16).collect_vec();
-
-        let mut partials = vec![vec![]; FRAME_SIZE];
-
-        for chunk in &samples.clone().into_iter().chunks(FRAME_SIZE) {
-            for (i, sample) in chunk.enumerate() {
-                partials[i].push(sample);
-            }
-        }
-
-        let samples_alt = partials.into_iter().flatten().collect_vec();
 
         util::write_wav(name, self.sample_rate, &samples, None).unwrap();
-        util::write_wav(
-            format!("alt_{}", name),
-            self.sample_rate,
-            &samples_alt,
-            None,
-        )
-        .unwrap();
     }
 }
 
@@ -193,6 +175,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut network = NeuralNet::new(&vs, device);
     let mut losses = vec![];
     for epoch_i in 0..=args.max_epoch {
+        let now = Instant::now();
         let (frames, targets) = signal.batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
         // let (frames, targets) = Audio::debug_batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
 
@@ -202,9 +185,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             args.debug_mode != 0 && (epoch_i == 0 || epoch_i == args.max_epoch),
         );
 
-        println!("Epoch {}, loss = {:.8}", epoch_i, loss);
+        println!(
+            "Epoch {}/{}, loss = {:.8} (time = {:?})",
+            epoch_i,
+            args.max_epoch,
+            loss,
+            now.elapsed(),
+        );
         losses.push(loss);
         if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
+            write_csv("outputs/losses.csv", &[losses.clone()]);
             generate(&args.out_path, epoch_i, length, &network, &signal);
         }
 
@@ -220,26 +210,36 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    write_csv("outputs/losses.csv", &[losses]);
     Ok(())
 }
 
 fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, signal: &Audio) {
+    let now = Instant::now();
     let (_, mut state) = network.zeros(1);
     let mut frame = signal.batch(1, 1, FRAME_SIZE).0.samples();
     let mut samples = Vec::with_capacity(length);
     samples.extend(frame.iter());
     println!("Generating {} samples...", length);
+
+    let mut i = 0;
     while samples.len() < length {
         let (next_frame, next_state) = network.forward(frame, &state, false);
         state = next_state;
         samples.extend(next_frame.iter());
         frame = next_frame;
 
-        if samples.len() % (length / 10).max(10_000) == 0 {
-            println!("Generating... ({:?} / {})", samples.len(), length)
+        if i % 500 == 0 {
+            println!(
+                "Generating... ({:?} / {} samples ({:.2}%), epoch {})",
+                samples.len(),
+                length,
+                100.0 * (samples.len() as f32 / length as f32),
+                epoch_i
+            )
         }
+        i += 1;
     }
 
     signal.write_to_file(&format!("{}{}.wav", name, epoch_i), &samples);
+    println!("Generated! time = {:?}", now.elapsed());
 }

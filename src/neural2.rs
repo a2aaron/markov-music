@@ -12,25 +12,26 @@ thread_local! {
     pub static EPOCH_I: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
 }
 
-// Size of batches
+pub const LEARN_RATE: f64 = 0.001;
+// Size of batches (recommended: 128)
 pub const BATCH_SIZE: usize = 128;
-// Length of BPTT sequence, in frames
-pub const NUM_FRAMES: usize = 16;
-// Size of frame, in samples
+// Length of BPTT sequence, in frames (recommended: 64)
+pub const NUM_FRAMES: usize = 64;
+// Size of frame, in samples (recommended: 16)
 pub const FRAME_SIZE: usize = 16;
 // Length of BPTT sequence, in samples (how long is a sequence during backprop)
 pub const SEQ_LEN: usize = NUM_FRAMES * FRAME_SIZE;
 // Quantization level (256 = 8 bit)
 pub const QUANTIZATION: usize = 256;
 
-// Hidden size of the LSTM
-// Databots recommended value: 1024?
-pub const HIDDEN_SIZE: usize = 256;
-// Number of RNNs layers to stack in the LSTM
-pub const N_RNN: usize = 1;
+// Hidden size of the LSTM (Recommended: 1024)
+pub const HIDDEN_SIZE: usize = 1024;
+// Number of RNNs layers to stack in the LSTM (Recommended: 5)
+pub const N_RNN: usize = 5;
 // Embedding size (embedding is like one-hot encoding, but
 // denser--network learns how to translate QUANTIZATION symbols into EMBED_SIZE dim vector)
 // Maybe this can be removed when EMBED_SIZE == QUANTIZATION?
+// Recommended: 256
 pub const EMBED_SIZE: usize = 256;
 
 fn debug_tensor(tensor: &Tensor, name: &str) {
@@ -270,7 +271,7 @@ pub struct NeuralNet {
 
 impl NeuralNet {
     pub fn new(vs: &VarStore, device: Device) -> NeuralNet {
-        let optim = nn::AdamW::default().build(vs, 0.01).unwrap();
+        let optim = nn::AdamW::default().build(vs, LEARN_RATE).unwrap();
         NeuralNet {
             frame_level_rnn: FrameLevelRNN::new(&vs),
             sample_predictor: SamplePredictor::new(&vs),
