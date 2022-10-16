@@ -2,59 +2,56 @@ use std::{error::Error, time::Instant};
 
 use clap::{command, Parser};
 use itertools::Itertools;
-use markov_music::neural2::{
-    assert_shape, reshape, write_csv, Frames, NeuralNet, BATCH_SIZE, FRAME_SIZE, NUM_FRAMES,
-    QUANTIZATION,
-};
+use markov_music::neural2::{assert_shape, reshape, write_csv, Frames, NetworkParams, NeuralNet};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tch::{nn, Device, IndexOp, Tensor};
 
 mod util;
 
-#[derive(Parser, Debug, Serialize, Deserialize, PartialEq, Eq)]
+const ARG_FILE: &str = "args.json";
+
+#[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 /// A WAV file generator powered by markov chain.
 struct Args {
-    /// Path to input MP3 file.
+    #[clap(flatten)]
+    other_args: OtherArgs,
+    #[clap(flatten)]
+    network_params: NetworkParams,
+}
+
+#[derive(Parser, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct OtherArgs {
+    /// Path to input file.
     #[arg(short, long = "in")]
     in_path: String,
-    /// Name of output WAV file. (will always have suffix of "i.wav", where i is the ith epoch)
+    /// Name of output WAV files
     #[arg(short, long = "out", default_value = "epoch")]
     out_path: String,
     /// Length, in seconds, of audio to generate.
     #[arg(long, default_value_t = 60)]
     length: usize,
+    /// How often to generate audio
     #[arg(long, default_value_t = 10)]
     generate_every: usize,
+    /// How often to checkpoint to a file
     #[arg(long, default_value_t = 100)]
-    max_epoch: usize,
-    /// If passed, allows settings to be updated each epoch via a text file
-    #[arg(long)]
-    settings_file: Option<String>,
+    checkpoint_every: usize,
+    /// Enables debug mode
     #[arg(long, default_value_t = 0)]
-    debug_mode: usize,
-    // #[arg(long, default_value_t = 128)]
-    // batch_size: usize,
-    // #[arg(long, default_value_t = 128)]
-    // frame_size: usize,
-    // #[arg(long, default_value_t = 128)]
-    // num_frames: usize,
-    // #[arg(long, default_value_t = 128)]
-    // hidden_size: usize,
-    // #[arg(long, default_value_t = 128)]
-    // n_rnn: usize,
-    // #[arg(long, default_value_t = 128)]
-    // embed_size: usize,
-    // #[arg(long, default_value_t = 128)]
-    // quantization: usize,
+    debug: usize,
 }
 
-impl Args {
-    fn try_from_file(path: &str) -> Result<Args, Box<dyn Error>> {
-        let mut args: Args = serde_json::from_slice(&std::fs::read(path)?)?;
-        args.settings_file = Some(path.to_string());
-        Ok(args)
+impl OtherArgs {
+    fn try_from_file(path: &str) -> Result<OtherArgs, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+    }
+
+    fn write_to_file(&self, path: &str) -> Result<(), Box<dyn Error>> {
+        let json = serde_json::ser::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
     }
 }
 
@@ -65,27 +62,27 @@ struct Audio {
     rounded_min: i64,
     len: usize,
     sample_rate: usize,
+    quantization: usize,
 }
 
 impl Audio {
-    fn new(input: &[i16], sample_rate: usize) -> Audio {
+    fn new(input: &[i16], sample_rate: usize, quantization: usize) -> Audio {
         let len = input.len();
         let max = input.iter().cloned().max().unwrap() as f32;
         let min = input.iter().cloned().min().unwrap() as f32;
-        let quantization = (QUANTIZATION - 1) as f32;
-        let scale = (max - min) / quantization;
+        let scale = (max - min) / ((quantization - 1) as f32);
         let audio = input
             .iter()
             .cloned()
             .map(|x| {
                 let sample = x as f32 / scale;
-                sample.round() as i64
+                sample.floor() as i64
             })
             .collect_vec();
 
         let rounded_min = *audio.iter().min().unwrap();
         let audio = audio.iter().cloned().map(|x| x - rounded_min).collect_vec();
-        assert!(audio.iter().all(|x| 0 <= *x && *x < QUANTIZATION as i64));
+        assert!(audio.iter().all(|x| 0 <= *x && *x < quantization as i64));
 
         let audio = Tensor::of_slice(&audio);
         Audio {
@@ -95,12 +92,12 @@ impl Audio {
             rounded_min,
             len,
             sample_rate,
+            quantization,
         }
     }
 
     fn unnormalize(&self, audio: &[i64]) -> Vec<f32> {
-        let quantization = (QUANTIZATION - 1) as f32;
-        let scale = (self.max - self.min) / quantization;
+        let scale = (self.max - self.min) / ((self.quantization - 1) as f32);
         audio
             .iter()
             .cloned()
@@ -154,60 +151,67 @@ impl Audio {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut args = Args::parse();
-    match args.debug_mode {
+    let args = Args::parse();
+    let (mut args, params) = (args.other_args, args.network_params);
+    args.write_to_file(ARG_FILE)?;
+
+    match args.debug {
         1 => std::env::set_var("RUST_BACKTRACE", "1"),
         2 => std::env::set_var("RUST_BACKTRACE", "full"),
         _ => (),
     }
 
     let (signal, _, sample_rate) = util::read_file(&args.in_path)?;
-    let signal = Audio::new(&signal, sample_rate);
+    let signal = Audio::new(&signal, sample_rate, params.quantization);
 
     println!("Input samples: {}", signal.len);
 
-    let length = sample_rate * args.length;
-
     let device = Device::cuda_if_available();
     println!("Training neural net on {:?}", device);
+    println!("== Parameters ==\n{:#?}", params);
+
     let vs = nn::VarStore::new(device);
 
-    let mut network = NeuralNet::new(&vs, device);
+    let mut network = NeuralNet::new(&vs, params);
     let mut losses = vec![];
-    for epoch_i in 0..=args.max_epoch {
-        let now = Instant::now();
-        let (frames, targets) = signal.batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
-        // let (frames, targets) = Audio::debug_batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
 
-        let loss = network.backward(
-            &frames,
-            &targets,
-            args.debug_mode != 0 && (epoch_i == 0 || epoch_i == args.max_epoch),
-        );
+    if args.debug != 0 {
+        signal.write_to_file("ground_truth.wav", &Vec::<i64>::from(&signal.audio));
+    }
+
+    for epoch_i in 0.. {
+        let now = Instant::now();
+        let (frames, targets) =
+            signal.batch(params.batch_size, params.num_frames, params.frame_size);
+
+        let loss = network.backward(&frames, &targets, args.debug != 0);
 
         println!(
-            "Epoch {}/{}, loss = {:.8} (time = {:?})",
+            "Epoch {}, loss = {:.8} (time = {:?})",
             epoch_i,
-            args.max_epoch,
             loss,
             now.elapsed(),
         );
         losses.push(loss);
         if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
-            write_csv("outputs/losses.csv", &[losses.clone()]);
-            generate(&args.out_path, epoch_i, length, &network, &signal);
+            write_csv(&format!("{}losses.csv", args.out_path), &[losses.clone()]);
+            generate(
+                &args.out_path,
+                epoch_i,
+                sample_rate * args.length,
+                &network,
+                &signal,
+            );
         }
 
-        if let Some(path) = &args.settings_file {
-            match Args::try_from_file(path) {
-                Ok(new_args) => {
-                    if new_args != args {
-                        println!("Updated args!");
-                        args = new_args;
-                    }
+        match OtherArgs::try_from_file(ARG_FILE) {
+            Ok(new_args) => {
+                if new_args != args {
+                    println!("Updated args!");
+                    args = new_args;
                 }
-                Err(err) => println!("Couldn't update args: {:?}", err),
             }
+            Err(err) => println!("Couldn't update args: {:?}", err),
         }
     }
     Ok(())
@@ -215,8 +219,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, signal: &Audio) {
     let now = Instant::now();
-    let (_, mut state) = network.zeros(1);
-    let mut frame = signal.batch(1, 1, FRAME_SIZE).0.samples();
+    let mut state = network.zeros(1);
+    let mut frame = signal.batch(1, 1, network.params.frame_size).0.samples();
     let mut samples = Vec::with_capacity(length);
     samples.extend(frame.iter());
     println!("Generating {} samples...", length);

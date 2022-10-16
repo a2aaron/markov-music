@@ -1,38 +1,53 @@
 use std::io::Write;
 
+use clap::Parser;
 use itertools::Itertools;
 use tch::{
     nn::{
         self, EmbeddingConfig, LSTMState, LinearConfig, Module, OptimizerConfig, RNNConfig,
         VarStore, RNN,
     },
-    Device, Kind, Tensor,
+    Kind, Tensor,
 };
 thread_local! {
     pub static EPOCH_I: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
 }
 
-pub const LEARN_RATE: f64 = 0.001;
-// Size of batches (recommended: 128)
-pub const BATCH_SIZE: usize = 128;
-// Length of BPTT sequence, in frames (recommended: 64)
-pub const NUM_FRAMES: usize = 64;
 // Size of frame, in samples (recommended: 16)
-pub const FRAME_SIZE: usize = 16;
-// Length of BPTT sequence, in samples (how long is a sequence during backprop)
-pub const SEQ_LEN: usize = NUM_FRAMES * FRAME_SIZE;
+const FRAME_SIZE: usize = 16;
 // Quantization level (256 = 8 bit)
-pub const QUANTIZATION: usize = 256;
+const QUANTIZATION: usize = 256;
 
 // Hidden size of the LSTM (Recommended: 1024)
-pub const HIDDEN_SIZE: usize = 1024;
-// Number of RNNs layers to stack in the LSTM (Recommended: 5)
-pub const N_RNN: usize = 5;
-// Embedding size (embedding is like one-hot encoding, but
-// denser--network learns how to translate QUANTIZATION symbols into EMBED_SIZE dim vector)
-// Maybe this can be removed when EMBED_SIZE == QUANTIZATION?
-// Recommended: 256
-pub const EMBED_SIZE: usize = 256;
+const HIDDEN_SIZE: usize = 1024;
+
+#[derive(Parser, Debug, Clone, Copy)]
+pub struct NetworkParams {
+    /// The learn rate of the network.
+    #[arg(long, default_value_t = 0.001)]
+    pub learn_rate: f64,
+    /// The batch size for the network.
+    #[arg(long, default_value_t = 128)]
+    pub batch_size: usize,
+    /// The size of each frame, in samples.
+    #[arg(long, default_value_t = 16)]
+    pub frame_size: usize,
+    /// The number of frames to use during training.
+    #[arg(long, default_value_t = 64)]
+    pub num_frames: usize,
+    /// The size of the hidden layers.
+    #[arg(long, default_value_t = 1024)]
+    pub hidden_size: usize,
+    /// The number of RNN layers to use.
+    #[arg(long, default_value_t = 5)]
+    pub rnn_layers: usize,
+    /// The size of the embedding
+    #[arg(long, default_value_t = 256)]
+    pub embed_size: usize,
+    /// The number of quantization levels to use.
+    #[arg(long, default_value_t = 256)]
+    pub quantization: usize,
+}
 
 fn debug_tensor(tensor: &Tensor, name: &str) {
     let epoch = EPOCH_I.with(|i| *i.borrow());
@@ -102,7 +117,6 @@ pub struct Frames {
     pub tensor: Tensor,
     batch_size: usize,
     num_frames: usize,
-    frame_size: usize,
 }
 impl Frames {
     pub fn new(frames: Tensor, batch_size: usize, num_frames: usize, frame_size: usize) -> Frames {
@@ -111,7 +125,6 @@ impl Frames {
             tensor: frames,
             batch_size,
             num_frames,
-            frame_size,
         }
     }
 
@@ -145,12 +158,19 @@ pub struct FrameLevelRNN {
 }
 
 impl FrameLevelRNN {
-    fn new(vs: &VarStore) -> FrameLevelRNN {
-        let lstm = lstm(&vs, FRAME_SIZE, HIDDEN_SIZE, N_RNN);
+    fn new(vs: &VarStore, params: NetworkParams) -> FrameLevelRNN {
+        let NetworkParams {
+            hidden_size,
+            rnn_layers,
+            frame_size,
+            ..
+        } = params;
+
+        let lstm = lstm(&vs, frame_size, hidden_size, rnn_layers);
         let linear = nn::linear(
             &vs.root(),
-            HIDDEN_SIZE as i64,
-            (FRAME_SIZE * HIDDEN_SIZE) as i64,
+            hidden_size as i64,
+            (frame_size * hidden_size) as i64,
             LinearConfig::default(),
         );
         FrameLevelRNN { lstm, linear }
@@ -205,50 +225,66 @@ pub struct SamplePredictor {
     linear_2: nn::Linear,
     linear_3: nn::Linear,
     linear_out: nn::Linear,
+
+    quantization: usize,
+    frame_size: usize,
+    hidden_size: usize,
+    embed_size: usize,
 }
 
 impl SamplePredictor {
-    fn new(vs: &VarStore) -> SamplePredictor {
+    fn new(vs: &VarStore, params: NetworkParams) -> SamplePredictor {
+        let NetworkParams {
+            quantization,
+            frame_size,
+            hidden_size,
+            embed_size,
+            ..
+        } = params;
+
         let embed = nn::embedding(
             &vs.root(),
-            QUANTIZATION as i64,
-            EMBED_SIZE as i64,
+            quantization as i64,
+            embed_size as i64,
             EmbeddingConfig::default(),
         );
-
-        // let linear_1 = linear(vs, EMBED_SIZE, HIDDEN_SIZE);
-        // I think the pytorch code is wrong--this should take in something of EMBED_SIZE, not FRAME_SIZE * EMBED_SIZE
-        // Maybe this was supposed to be RATIO * EMBED_SIZE, where RATIO is the upscale/downscale
-        // ratio between tiers?
-        let linear_1 = linear(vs, FRAME_SIZE * EMBED_SIZE, HIDDEN_SIZE);
-
-        let linear_2 = linear(vs, HIDDEN_SIZE, HIDDEN_SIZE);
-        let linear_3 = linear(vs, HIDDEN_SIZE, HIDDEN_SIZE);
-        let linear_out = linear(vs, HIDDEN_SIZE, QUANTIZATION);
+        let linear_1 = linear(vs, frame_size * embed_size, hidden_size);
+        let linear_2 = linear(vs, hidden_size, hidden_size);
+        let linear_3 = linear(vs, hidden_size, hidden_size);
+        let linear_out = linear(vs, hidden_size, quantization);
         SamplePredictor {
             embed,
             linear_1,
             linear_2,
             linear_3,
             linear_out,
+            quantization,
+            frame_size,
+            hidden_size,
+            embed_size,
         }
     }
 
     fn forward(&self, conditioning: &ConditioningVector, frame: &Tensor) -> Tensor {
         let batch_size = frame.size()[0] as usize;
         let unfold_size = frame.size()[1] as usize;
+        let frame_size = self.frame_size;
+        let embed_size = self.embed_size;
+        let hidden_size = self.hidden_size;
+        let quantization = self.quantization;
+
         let frame = &frame;
 
         let frame = self.embed.forward(&frame);
-        assert_shape(&[batch_size, unfold_size, FRAME_SIZE, EMBED_SIZE], &frame);
+        assert_shape(&[batch_size, unfold_size, frame_size, embed_size], &frame);
 
-        let frame = reshape(&[batch_size, unfold_size, FRAME_SIZE * EMBED_SIZE], &frame);
+        let frame = reshape(&[batch_size, unfold_size, frame_size * embed_size], &frame);
 
         let mut out = self.linear_1.forward(&frame);
         let conditioning = conditioning.shorten_to(unfold_size);
 
-        assert_shape(&[batch_size, unfold_size, HIDDEN_SIZE], &out);
-        assert_shape(&[batch_size, unfold_size, HIDDEN_SIZE], &conditioning);
+        assert_shape(&[batch_size, unfold_size, hidden_size], &out);
+        assert_shape(&[batch_size, unfold_size, hidden_size], &conditioning);
 
         out += conditioning;
         let out = self.linear_2.forward(&out);
@@ -257,7 +293,7 @@ impl SamplePredictor {
         let out = out.relu();
         let out = self.linear_out.forward(&out);
 
-        assert_shape(&[batch_size, unfold_size, QUANTIZATION], &out);
+        assert_shape(&[batch_size, unfold_size, quantization], &out);
 
         out
     }
@@ -266,27 +302,22 @@ pub struct NeuralNet {
     frame_level_rnn: FrameLevelRNN,
     sample_predictor: SamplePredictor,
     optim: nn::Optimizer,
-    device: Device,
+    pub params: NetworkParams,
 }
 
 impl NeuralNet {
-    pub fn new(vs: &VarStore, device: Device) -> NeuralNet {
-        let optim = nn::AdamW::default().build(vs, LEARN_RATE).unwrap();
+    pub fn new(vs: &VarStore, params: NetworkParams) -> NeuralNet {
+        let optim = nn::AdamW::default().build(vs, params.learn_rate).unwrap();
         NeuralNet {
-            frame_level_rnn: FrameLevelRNN::new(&vs),
-            sample_predictor: SamplePredictor::new(&vs),
-            device,
+            frame_level_rnn: FrameLevelRNN::new(&vs, params),
+            sample_predictor: SamplePredictor::new(&vs, params),
             optim,
+            params: params.clone(),
         }
     }
 
-    pub fn zeros(&self, batch_dim: usize) -> (Tensor, LSTMState) {
-        let frame = Tensor::zeros(
-            &[batch_dim as i64, 1, FRAME_SIZE as i64],
-            (Kind::Int64, self.device),
-        );
-        let state = self.frame_level_rnn.lstm.zero_state(batch_dim as i64);
-        (frame, state)
+    pub fn zeros(&self, batch_dim: usize) -> LSTMState {
+        self.frame_level_rnn.lstm.zero_state(batch_dim as i64)
     }
 
     pub fn forward(
@@ -295,24 +326,30 @@ impl NeuralNet {
         state: &LSTMState,
         debug_mode: bool,
     ) -> (Vec<i64>, LSTMState) {
-        assert_eq!(sliding_window.len(), FRAME_SIZE);
-        let mut out_samples = Vec::with_capacity(FRAME_SIZE);
+        let NetworkParams {
+            frame_size,
+            quantization,
+            ..
+        } = self.params;
+
+        assert_eq!(sliding_window.len(), frame_size);
+        let mut out_samples = Vec::with_capacity(frame_size);
 
         let mut frame = Frames::from_samples(&sliding_window);
         let (conditioning, state) = self.frame_level_rnn.forward(&frame, state, debug_mode);
 
-        for _ in 0..FRAME_SIZE {
+        for _ in 0..frame_size {
             let logits = self.sample_predictor.forward(&conditioning, &frame.tensor);
 
-            assert_shape(&[1, 1, QUANTIZATION], &logits);
-            let sample = reshape(&[QUANTIZATION], &logits);
+            assert_shape(&[1, 1, quantization], &logits);
+            let sample = reshape(&[quantization], &logits);
             let sample = sample.softmax(-1, Kind::Float).multinomial(1, false);
             assert_shape(&[1], &sample);
             let sample = i64::from(sample);
 
             sliding_window.remove(0);
             sliding_window.push(sample);
-            assert_eq!(sliding_window.len(), FRAME_SIZE);
+            assert_eq!(sliding_window.len(), frame_size);
 
             frame = Frames::from_samples(&sliding_window);
             out_samples.push(sample);
@@ -322,7 +359,15 @@ impl NeuralNet {
     }
 
     pub fn backward(&mut self, frame: &Frames, targets: &Frames, debug_mode: bool) -> f32 {
-        let zero_state = self.zeros(BATCH_SIZE).1;
+        let NetworkParams {
+            batch_size,
+            frame_size,
+            num_frames,
+            quantization,
+            ..
+        } = self.params;
+
+        let zero_state = self.zeros(batch_size);
         let (conditioning, _) = self
             .frame_level_rnn
             .forward(&frame, &zero_state, debug_mode);
@@ -332,17 +377,15 @@ impl NeuralNet {
             .sample_predictor
             .forward(&conditioning, &unfolded_frame);
 
-        assert_shape(&[BATCH_SIZE, unfold_size, QUANTIZATION], &logits);
+        assert_shape(&[batch_size, unfold_size, quantization], &logits);
 
-        let batch_size = BATCH_SIZE as i64;
-        let seq_len = SEQ_LEN as i64;
-        let quantization = QUANTIZATION as i64;
+        let seq_len = num_frames * frame_size;
 
-        let logits_view = logits.reshape(&[batch_size * unfold_size as i64, quantization]);
+        let logits_view = reshape(&[batch_size * unfold_size, quantization], &logits);
 
-        let targets = targets.tensor.reshape(&[batch_size, seq_len]);
+        let targets = reshape(&[batch_size, seq_len], &targets.tensor);
         let targets = targets.narrow(1, 0, unfold_size as i64);
-        let targets = targets.reshape(&[batch_size * unfold_size as i64]);
+        let targets = reshape(&[batch_size * unfold_size], &targets);
 
         if debug_mode {
             println!("====== NEURALNET::BACKWARDS ======");
