@@ -13,14 +13,6 @@ thread_local! {
     pub static EPOCH_I: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
 }
 
-// Size of frame, in samples (recommended: 16)
-const FRAME_SIZE: usize = 16;
-// Quantization level (256 = 8 bit)
-const QUANTIZATION: usize = 256;
-
-// Hidden size of the LSTM (Recommended: 1024)
-const HIDDEN_SIZE: usize = 1024;
-
 #[derive(Parser, Debug, Clone, Copy)]
 pub struct NetworkParams {
     /// The learn rate of the network.
@@ -88,27 +80,37 @@ pub struct ConditioningVector {
     pub tensor: Tensor,
     batch_size: usize,
     num_frames: usize,
+    hidden_size: usize,
+    frame_size: usize,
 }
 impl ConditioningVector {
-    pub fn new(conditioning: Tensor, batch_size: usize, num_frames: usize) -> ConditioningVector {
+    pub fn new(
+        conditioning: Tensor,
+        batch_size: usize,
+        num_frames: usize,
+        hidden_size: usize,
+        frame_size: usize,
+    ) -> ConditioningVector {
         assert_shape(
-            &[batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE],
+            &[batch_size, num_frames * frame_size, hidden_size],
             &conditioning,
         );
         ConditioningVector {
             tensor: conditioning,
             batch_size,
             num_frames,
+            hidden_size,
+            frame_size,
         }
     }
 
     // Shorten the conditioning vector along the sample dimension. The output vector has shape
-    // [batch_size, shortened_size, HIDDEN_SIZE]
-    // Requires 0 < shortened_size && shortened_size <= self.num_frames * FRAME_SIZE
+    // [batch_size, shortened_size, hidden_size]
+    // Requires 0 < shortened_size && shortened_size <= self.num_frames * frame_size
     fn shorten_to(&self, shortened_size: usize) -> Tensor {
-        assert!(0 < shortened_size && shortened_size <= self.num_frames * FRAME_SIZE);
+        assert!(0 < shortened_size && shortened_size <= self.num_frames * self.frame_size);
         let short = self.tensor.narrow(1, 0, shortened_size as i64);
-        assert_shape(&[self.batch_size, shortened_size, HIDDEN_SIZE], &short);
+        assert_shape(&[self.batch_size, shortened_size, self.hidden_size], &short);
         short
     }
 }
@@ -117,6 +119,7 @@ pub struct Frames {
     pub tensor: Tensor,
     batch_size: usize,
     num_frames: usize,
+    frame_size: usize,
 }
 impl Frames {
     pub fn new(frames: Tensor, batch_size: usize, num_frames: usize, frame_size: usize) -> Frames {
@@ -125,6 +128,7 @@ impl Frames {
             tensor: frames,
             batch_size,
             num_frames,
+            frame_size,
         }
     }
 
@@ -141,13 +145,13 @@ impl Frames {
     fn unfold(&self) -> (Tensor, usize) {
         // Get a bunch of local sliding windows across the input sequence.
         let frame = reshape(
-            &[self.batch_size, self.num_frames * FRAME_SIZE],
+            &[self.batch_size, self.num_frames * self.frame_size],
             &self.tensor,
         );
-        let frame = frame.unfold(1, FRAME_SIZE as i64, 1);
+        let frame = frame.unfold(1, self.frame_size as i64, 1);
 
-        let unfold_size = self.num_frames * FRAME_SIZE - FRAME_SIZE + 1;
-        assert_shape(&[self.batch_size, unfold_size, FRAME_SIZE], &frame);
+        let unfold_size = self.num_frames * self.frame_size - self.frame_size + 1;
+        assert_shape(&[self.batch_size, unfold_size, self.frame_size], &frame);
         (frame, unfold_size)
     }
 }
@@ -155,6 +159,9 @@ impl Frames {
 pub struct FrameLevelRNN {
     lstm: nn::LSTM,
     linear: nn::Linear,
+    hidden_size: usize,
+    frame_size: usize,
+    quantization: usize,
 }
 
 impl FrameLevelRNN {
@@ -163,6 +170,7 @@ impl FrameLevelRNN {
             hidden_size,
             rnn_layers,
             frame_size,
+            quantization,
             ..
         } = params;
 
@@ -173,7 +181,13 @@ impl FrameLevelRNN {
             (frame_size * hidden_size) as i64,
             LinearConfig::default(),
         );
-        FrameLevelRNN { lstm, linear }
+        FrameLevelRNN {
+            lstm,
+            linear,
+            hidden_size,
+            frame_size,
+            quantization,
+        }
     }
 
     fn forward(
@@ -184,17 +198,20 @@ impl FrameLevelRNN {
     ) -> (ConditioningVector, LSTMState) {
         let batch_size = frame.batch_size;
         let num_frames = frame.num_frames;
+        let frame_size = self.frame_size;
+        let hidden_size = self.hidden_size;
+        let quantization = self.quantization;
         let frame = &frame.tensor;
-        assert_shape(&[batch_size, num_frames, FRAME_SIZE], &frame);
+        assert_shape(&[batch_size, num_frames, frame_size], &frame);
 
         let frame = frame.to_kind(Kind::Float);
         let frame = frame
-            .divide_scalar((QUANTIZATION / 2) as f64)
+            .divide_scalar((quantization / 2) as f64)
             .g_sub_scalar(1.0f64)
             .g_mul_scalar(2.0f64);
 
         let (conditioning, state) = self.lstm.seq_init(&frame, state);
-        assert_shape(&[batch_size, num_frames, HIDDEN_SIZE], &conditioning);
+        assert_shape(&[batch_size, num_frames, hidden_size], &conditioning);
 
         if debug_mode {
             println!("====== FRAMELEVELRNN::FORWARDS ======");
@@ -204,16 +221,22 @@ impl FrameLevelRNN {
 
         let conditioning = self.linear.forward(&conditioning);
         assert_shape(
-            &[batch_size, num_frames, FRAME_SIZE * HIDDEN_SIZE],
+            &[batch_size, num_frames, frame_size * hidden_size],
             &conditioning,
         );
 
         let conditioning = reshape(
-            &[batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE],
+            &[batch_size, num_frames * frame_size, hidden_size],
             &conditioning,
         );
         (
-            ConditioningVector::new(conditioning, batch_size, num_frames),
+            ConditioningVector::new(
+                conditioning,
+                batch_size,
+                num_frames,
+                hidden_size,
+                frame_size,
+            ),
             state,
         )
     }
