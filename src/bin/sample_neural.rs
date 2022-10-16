@@ -145,35 +145,6 @@ impl Audio {
         )
     }
 
-    fn debug_batch(
-        &self,
-        batch_size: usize,
-        num_frames: usize,
-        frame_size: usize,
-    ) -> (Frames, Frames) {
-        let total_elements = batch_size * num_frames * frame_size;
-        let i = rand::thread_rng().gen_range(0..100000) as i64;
-        let input = (0..)
-            .take(total_elements)
-            .map(|i| (i % QUANTIZATION) as i64)
-            .collect::<Vec<_>>();
-        let targets = (0..)
-            .take(total_elements)
-            .map(|i| ((i + frame_size) % QUANTIZATION) as i64)
-            .collect::<Vec<_>>();
-
-        let input = Tensor::of_slice(&input);
-        let targets = Tensor::of_slice(&targets);
-
-        let input = reshape(&[batch_size, num_frames, frame_size], &input);
-        let targets = reshape(&[batch_size, num_frames, frame_size], &targets);
-
-        (
-            Frames::new(input, batch_size, num_frames, frame_size),
-            Frames::new(targets, batch_size, num_frames, frame_size),
-        )
-    }
-
     fn write_to_file(&self, name: &str, audio: &[i64]) {
         let samples = self.unnormalize(audio);
         let samples = samples.iter().map(|x| *x as i16).collect_vec();
@@ -225,7 +196,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let (frames, targets) = signal.batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
         // let (frames, targets) = Audio::debug_batch(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE);
 
-        let (loss, logits, target_reshape) = network.backward(
+        let loss = network.backward(
             &frames,
             &targets,
             args.debug_mode != 0 && (epoch_i == 0 || epoch_i == args.max_epoch),
@@ -234,38 +205,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("Epoch {}, loss = {:.8}", epoch_i, loss);
         losses.push(loss);
         if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
-            signal.write_to_file(
-                &format!("{}_target{}.wav", &args.out_path, epoch_i),
-                &frames.samples(),
-            );
-            signal.write_to_file(
-                &format!("{}_input{}.wav", &args.out_path, epoch_i),
-                &targets.samples(),
-            );
-            signal.write_to_file(
-                &format!("{}_target_reshape{}.wav", &args.out_path, epoch_i),
-                &Vec::<i64>::from(&target_reshape),
-            );
-
-            let mut logits_sampled = vec![];
-            for i in 0..logits.size()[0] {
-                for j in 0..logits.size()[1] {
-                    let logit = logits.i((i, j));
-                    assert_shape(&[QUANTIZATION], &logit);
-                    let softmax = logit.softmax(-1, tch::Kind::Float);
-                    // println!("{} {} {:?} {:?}", i, j, logit.size(), softmax.size());
-                    let sample = softmax.multinomial(1, false);
-                    assert_shape(&[1], &sample);
-                    let sample = i64::from(sample);
-                    logits_sampled.push(sample);
-                }
-            }
-            // println!("{:?}", logits.size());
-            signal.write_to_file(
-                &format!("{}_logits_sampled{}.wav", &args.out_path, epoch_i),
-                &logits_sampled,
-            );
-
             generate(&args.out_path, epoch_i, length, &network, &signal);
         }
 

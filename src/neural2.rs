@@ -320,12 +320,7 @@ impl NeuralNet {
         (out_samples, state)
     }
 
-    pub fn backward(
-        &mut self,
-        frame: &Frames,
-        targets: &Frames,
-        debug_mode: bool,
-    ) -> (f32, Tensor, Tensor) {
+    pub fn backward(&mut self, frame: &Frames, targets: &Frames, debug_mode: bool) -> f32 {
         let zero_state = self.zeros(BATCH_SIZE).1;
         let (conditioning, _) = self
             .frame_level_rnn
@@ -360,7 +355,7 @@ impl NeuralNet {
         self.optim.backward_step_clip(&loss, 0.5);
 
         EPOCH_I.with(|i| *i.borrow_mut() += 1);
-        (f32::from(loss), logits, targets)
+        f32::from(loss)
     }
 }
 
