@@ -1,6 +1,5 @@
 use std::io::Write;
 
-use clap::Parser;
 use itertools::Itertools;
 use tch::{
     nn::{
@@ -13,31 +12,23 @@ thread_local! {
     pub static EPOCH_I: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
 }
 
-#[derive(Parser, Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct NetworkParams {
     /// The learn rate of the network.
-    #[arg(long, default_value_t = 0.001)]
     pub learn_rate: f64,
     /// The batch size for the network.
-    #[arg(long, default_value_t = 128)]
     pub batch_size: usize,
     /// The size of each frame, in samples.
-    #[arg(long, default_value_t = 16)]
     pub frame_size: usize,
     /// The number of frames to use during training.
-    #[arg(long, default_value_t = 64)]
     pub num_frames: usize,
     /// The size of the hidden layers.
-    #[arg(long, default_value_t = 1024)]
     pub hidden_size: usize,
     /// The number of RNN layers to use.
-    #[arg(long, default_value_t = 5)]
     pub rnn_layers: usize,
     /// The size of the embedding
-    #[arg(long, default_value_t = 256)]
     pub embed_size: usize,
     /// The number of quantization levels to use.
-    #[arg(long, default_value_t = 256)]
     pub quantization: usize,
 }
 
@@ -337,6 +328,11 @@ impl NeuralNet {
             optim,
             params: params.clone(),
         }
+    }
+
+    pub fn set_learn_rate(&mut self, learn_rate: f64) {
+        self.params.learn_rate = learn_rate;
+        self.optim.set_lr(learn_rate);
     }
 
     pub fn zeros(&self, batch_dim: usize) -> LSTMState {

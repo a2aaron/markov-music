@@ -9,21 +9,11 @@ use tch::{nn, Device, IndexOp, Tensor};
 
 mod util;
 
-const ARG_FILE: &str = "args.json";
-
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 /// A WAV file generator powered by markov chain.
 struct Args {
-    #[clap(flatten)]
-    other_args: OtherArgs,
-    #[clap(flatten)]
-    network_params: NetworkParams,
-}
-
-#[derive(Parser, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct OtherArgs {
-    /// Path to input file.
+    /// Path to input files.
     #[arg(short, long = "in")]
     in_path: String,
     /// Name of output WAV files
@@ -41,10 +31,90 @@ struct OtherArgs {
     /// Enables debug mode
     #[arg(long, default_value_t = 0)]
     debug: usize,
+    /// The learn rate of the network.
+    #[arg(long, default_value_t = 0.001)]
+    learn_rate: f64,
+    /// The batch size for the network.
+    #[arg(long, default_value_t = 128)]
+    batch_size: usize,
+    /// The size of each frame, in samples.
+    #[arg(long, default_value_t = 16)]
+    frame_size: usize,
+    /// The number of frames to use during training.
+    #[arg(long, default_value_t = 64)]
+    num_frames: usize,
+    /// The size of the hidden layers.
+    #[arg(long, default_value_t = 1024)]
+    hidden_size: usize,
+    /// The number of RNN layers to use.
+    #[arg(long, default_value_t = 5)]
+    rnn_layers: usize,
+    /// The size of the embedding
+    #[arg(long, default_value_t = 256)]
+    embed_size: usize,
+    /// The number of quantization levels to use.
+    #[arg(long, default_value_t = 256)]
+    quantization: usize,
+    /// The file to read parameters from
+    #[arg(long, default_value_t = String::from("args.json"))]
+    args_file: String,
 }
 
-impl OtherArgs {
-    fn try_from_file(path: &str) -> Result<OtherArgs, Box<dyn Error>> {
+impl Args {
+    fn network_params(&self) -> NetworkParams {
+        NetworkParams {
+            learn_rate: self.learn_rate,
+            batch_size: self.batch_size,
+            frame_size: self.frame_size,
+            num_frames: self.num_frames,
+            hidden_size: self.hidden_size,
+            rnn_layers: self.rnn_layers,
+            embed_size: self.embed_size,
+            quantization: self.quantization,
+        }
+    }
+    fn get_updatable(&self) -> UpdatableArgs {
+        UpdatableArgs {
+            out_path: self.out_path.clone(),
+            length: self.length,
+            generate_every: self.generate_every,
+            checkpoint_every: self.checkpoint_every,
+            debug: self.debug,
+            learn_rate: EqF64(self.learn_rate),
+        }
+    }
+    fn set_updatable(&mut self, updatable: &UpdatableArgs) {
+        self.out_path = updatable.out_path.clone();
+        self.length = updatable.length;
+        self.generate_every = updatable.generate_every;
+        self.checkpoint_every = updatable.checkpoint_every;
+        self.debug = updatable.debug;
+        self.learn_rate = updatable.learn_rate.0;
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+struct EqF64(f64);
+impl PartialEq for EqF64 {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.total_cmp(&other.0).is_eq()
+    }
+}
+
+impl Eq for EqF64 {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct UpdatableArgs {
+    out_path: String,
+    length: usize,
+    generate_every: usize,
+    checkpoint_every: usize,
+    debug: usize,
+    learn_rate: EqF64,
+}
+
+impl UpdatableArgs {
+    fn try_from_file(path: &str) -> Result<UpdatableArgs, Box<dyn Error>> {
         Ok(serde_json::from_slice(&std::fs::read(path)?)?)
     }
 
@@ -151,9 +221,9 @@ impl Audio {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
-    let (mut args, params) = (args.other_args, args.network_params);
-    args.write_to_file(ARG_FILE)?;
+    let mut args = Args::parse();
+    let params = args.network_params();
+    args.get_updatable().write_to_file(&args.args_file)?;
 
     match args.debug {
         1 => std::env::set_var("RUST_BACKTRACE", "1"),
@@ -168,7 +238,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let device = Device::cuda_if_available();
     println!("Training neural net on {:?}", device);
-    println!("== Parameters ==\n{:#?}", params);
+    println!("== Arguments ==\n{:#?}", args);
+    println!("===============");
 
     let vs = nn::VarStore::new(device);
 
@@ -204,11 +275,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
         }
 
-        match OtherArgs::try_from_file(ARG_FILE) {
+        match UpdatableArgs::try_from_file(&args.args_file) {
             Ok(new_args) => {
-                if new_args != args {
-                    println!("Updated args!");
-                    args = new_args;
+                if new_args != args.get_updatable() {
+                    println!("Updated args!\n{:#?}", new_args);
+                    args.set_updatable(&new_args);
+                    network.set_learn_rate(new_args.learn_rate.0);
                 }
             }
             Err(err) => println!("Couldn't update args: {:?}", err),
