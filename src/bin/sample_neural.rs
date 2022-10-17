@@ -281,8 +281,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Training neural net on {:?}", device);
     println!("== Arguments ==\n{:#?}", args);
     println!("===============");
+    {
+        signal.write_to_file(
+            &format!("{}_ground_truth.wav", args.out_path),
+            &Vec::<i64>::from(&signal.audio),
+        );
 
-    signal.write_to_file("ground_truth.wav", &Vec::<i64>::from(&signal.audio));
+        let (inputs, targets) = signal.batch(args.batch_size, args.num_frames, args.frame_size);
+        signal.write_to_file(
+            &format!("{}_batch_example_inputs.wav", args.out_path),
+            &inputs.samples(),
+        );
+        signal.write_to_file(
+            &format!("{}_batch_example_targets.wav", args.out_path),
+            &targets.samples(),
+        );
+    }
 
     for epoch_i in 0.. {
         let now = Instant::now();
@@ -305,15 +319,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 err
             );
         }
-        if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
-            generate(
-                &args.out_path,
-                epoch_i,
-                sample_rate * args.length,
-                &network,
-                &signal,
-            );
-        }
 
         if args.checkpoint_every != 0 && epoch_i % args.checkpoint_every == 0 {
             let path = format!("{}_epoch_{}", args.out_path, epoch_i);
@@ -325,6 +330,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 println!("Checkpointed at epoch {} to file {}", epoch_i, path);
             };
+        }
+
+        if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
+            generate(
+                &args.out_path,
+                epoch_i,
+                sample_rate * args.length,
+                &network,
+                &signal,
+            );
         }
 
         match UpdatableArgs::try_from_file(&args.args_file) {
