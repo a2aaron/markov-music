@@ -5,9 +5,25 @@ use wav::WAV_FORMAT_PCM;
 pub fn read_file(
     path: impl AsRef<Path>,
 ) -> Result<(Vec<i16>, Option<Vec<i16>>, usize), Box<dyn Error>> {
+    if let Some(extension) = path.as_ref().extension() {
+        if extension == "mp3" {
+            if let Ok(mp3_data) = read_mp3_file(&path) {
+                println!("Parsing as mp3");
+                return Ok(mp3_data);
+            }
+        } else if extension == "wav" {
+            if let Ok(wav_data) = read_wav_file(&path) {
+                println!("Parsing as wav");
+                return Ok(wav_data);
+            }
+        }
+    }
+
     if let Ok(mp3_data) = read_mp3_file(&path) {
+        println!("Parsing as mp3");
         Ok(mp3_data)
     } else {
+        println!("Parsing as wav");
         read_wav_file(path)
     }
 }
