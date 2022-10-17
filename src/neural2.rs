@@ -3,10 +3,7 @@ use std::{error::Error, io::Write, path::Path};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use tch::{
-    nn::{
-        self, EmbeddingConfig, LSTMState, LinearConfig, Module, OptimizerConfig, RNNConfig,
-        VarStore, RNN,
-    },
+    nn::{self, EmbeddingConfig, LinearConfig, Module, OptimizerConfig, RNNConfig, VarStore, RNN},
     Kind, Tensor,
 };
 thread_local! {
@@ -31,6 +28,8 @@ pub struct NetworkParams {
     pub embed_size: usize,
     /// The number of quantization levels to use.
     pub quantization: usize,
+    /// Use skip connections in the RNN or not.
+    pub skip_connections: bool,
 }
 
 fn debug_tensor(tensor: &Tensor, name: &str) {
@@ -154,8 +153,153 @@ impl Frames {
     }
 }
 
+struct LSTMSkipConn {
+    lstms: Vec<nn::LSTM>,
+    hidden_size: usize,
+    frame_size: usize,
+}
+
+impl LSTMSkipConn {
+    fn new(vs: &VarStore, params: NetworkParams, prefix_name: &str) -> LSTMSkipConn {
+        let NetworkParams {
+            hidden_size,
+            rnn_layers,
+            frame_size,
+            ..
+        } = params;
+
+        let mut lstms = vec![];
+        for i in 0..rnn_layers {
+            let path = format!("{}_lstm_skip_conn{}", prefix_name, i);
+
+            let in_dim = if i == 0 {
+                frame_size
+            } else {
+                // The size of the layers with a skip connection will be equal to the size of the
+                // hidden state tensor concated with the input frame.
+                // Hence, it will have size hidden_size + frame_size
+                hidden_size + frame_size
+            };
+            let lstm = lstm(&vs, &path, in_dim, hidden_size, 1);
+
+            lstms.push(lstm)
+        }
+        LSTMSkipConn {
+            lstms,
+            hidden_size,
+            frame_size,
+        }
+    }
+}
+
+impl RNN for LSTMSkipConn {
+    type State = LSTMSkipConnState;
+
+    fn zero_state(&self, batch_dim: i64) -> LSTMSkipConnState {
+        let states = self
+            .lstms
+            .iter()
+            .map(|lstm| lstm.zero_state(batch_dim))
+            .collect_vec();
+        LSTMSkipConnState(states)
+    }
+
+    fn step(&self, input: &Tensor, in_state: &Self::State) -> Self::State {
+        let input = input.unsqueeze(1);
+        let (_output, state) = self.seq_init(&input, in_state);
+        state
+    }
+
+    fn seq_init(&self, frame: &Tensor, states: &Self::State) -> (Tensor, Self::State) {
+        let batch_size = frame.size()[0] as usize;
+        let num_frames = frame.size()[1] as usize;
+        let frame_size = self.frame_size;
+        let hidden_size = self.hidden_size;
+        let rnn_layers = self.lstms.len();
+        let states = &states.0;
+
+        assert_eq!(self.frame_size as i64, frame.size()[2]);
+        assert_eq!(rnn_layers, states.len());
+
+        let mut new_states = Vec::with_capacity(rnn_layers);
+
+        let (mut final_output, new_state) = self.lstms[0].seq_init(&frame, &states[0]);
+        assert_shape(&[batch_size, num_frames, hidden_size], &final_output);
+
+        new_states.push(new_state);
+
+        for i in 1..self.lstms.len() {
+            assert_shape(&[batch_size, num_frames, hidden_size], &final_output);
+            assert_shape(&[batch_size, num_frames, frame_size], &frame);
+            let input = Tensor::concat(&[&final_output, &frame], 2);
+            assert_shape(&[batch_size, num_frames, hidden_size + frame_size], &input);
+
+            let (output, new_state) = self.lstms[i].seq_init(&input, &states[i]);
+
+            assert_shape(&[batch_size, num_frames, hidden_size], &output);
+
+            final_output = output;
+            new_states.push(new_state);
+        }
+
+        assert_shape(&[batch_size, num_frames, hidden_size], &final_output);
+        (final_output, LSTMSkipConnState(new_states))
+    }
+}
+
+pub struct LSTMSkipConnState(pub Vec<nn::LSTMState>);
+
+enum LSTMType {
+    Normal(nn::LSTM),
+    SkipConn(LSTMSkipConn),
+}
+impl LSTMType {
+    fn seq_init(&self, frame: &Tensor, state: &LSTMState) -> (Tensor, LSTMState) {
+        match (self, state) {
+            (LSTMType::Normal(lstm), LSTMState::Normal(state)) => {
+                let (conditioning, state) = lstm.seq_init(&frame, state);
+                (conditioning, state.into())
+            }
+            (LSTMType::SkipConn(lstm), LSTMState::SkipConn(state)) => {
+                let (conditioning, state) = lstm.seq_init(&frame, state);
+                (conditioning, state.into())
+            }
+            (LSTMType::Normal(_), LSTMState::SkipConn(_)) => {
+                panic!("Expected LSTMState to be Normal, got SkipConn")
+            }
+            (LSTMType::SkipConn(_), LSTMState::Normal(_)) => {
+                panic!("Expected LSTMState to be SkipConn, got Normal")
+            }
+        }
+    }
+
+    fn zero_state(&self, batch_dim: i64) -> LSTMState {
+        match self {
+            LSTMType::Normal(lstm) => lstm.zero_state(batch_dim).into(),
+            LSTMType::SkipConn(lstm) => lstm.zero_state(batch_dim).into(),
+        }
+    }
+}
+
+pub enum LSTMState {
+    Normal(nn::LSTMState),
+    SkipConn(LSTMSkipConnState),
+}
+
+impl From<nn::LSTMState> for LSTMState {
+    fn from(value: nn::LSTMState) -> Self {
+        LSTMState::Normal(value)
+    }
+}
+
+impl From<LSTMSkipConnState> for LSTMState {
+    fn from(value: LSTMSkipConnState) -> Self {
+        LSTMState::SkipConn(value)
+    }
+}
+
 pub struct FrameLevelRNN {
-    lstm: nn::LSTM,
+    lstm: LSTMType,
     linear: nn::Linear,
     hidden_size: usize,
     frame_size: usize,
@@ -166,13 +310,19 @@ impl FrameLevelRNN {
     fn new(vs: &VarStore, params: NetworkParams) -> FrameLevelRNN {
         let NetworkParams {
             hidden_size,
-            rnn_layers,
             frame_size,
             quantization,
+            rnn_layers,
             ..
         } = params;
 
-        let lstm = lstm(&vs, "frame_lstm", frame_size, hidden_size, rnn_layers);
+        let lstm = if params.skip_connections {
+            let lstm = LSTMSkipConn::new(vs, params, "frame_lstm");
+            LSTMType::SkipConn(lstm)
+        } else {
+            let lstm = lstm(&vs, "frame_lstm", frame_size, hidden_size, rnn_layers);
+            LSTMType::Normal(lstm)
+        };
         let linear = linear(&vs, "frame_linear", hidden_size, frame_size * hidden_size);
         FrameLevelRNN {
             lstm,

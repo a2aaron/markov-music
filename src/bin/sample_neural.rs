@@ -54,6 +54,9 @@ struct Args {
     /// The number of RNN layers to use.
     #[arg(long, default_value_t = 5)]
     rnn_layers: usize,
+    /// If provided, do not use skip connections in the RNN layers.
+    #[arg(long, default_value_t = false)]
+    no_skip_connections: bool,
     /// The size of the embedding
     #[arg(long, default_value_t = 256)]
     embed_size: usize,
@@ -76,6 +79,7 @@ impl Args {
             rnn_layers: self.rnn_layers,
             embed_size: self.embed_size,
             quantization: self.quantization,
+            skip_connections: !self.no_skip_connections,
         }
     }
 
@@ -88,6 +92,7 @@ impl Args {
         self.rnn_layers = params.rnn_layers;
         self.embed_size = params.embed_size;
         self.quantization = params.quantization;
+        self.no_skip_connections = !params.skip_connections;
     }
 
     fn get_updatable(&self) -> UpdatableArgs {
