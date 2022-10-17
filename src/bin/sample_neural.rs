@@ -22,6 +22,11 @@ struct Args {
     /// Length, in seconds, of audio to generate.
     #[arg(long, default_value_t = 60)]
     length: usize,
+    /// If provided, load a model from a checkpoint.
+    #[arg(long)]
+    load_model: Option<String>,
+    #[arg(long)]
+    load_params: Option<String>,
     /// How often to generate audio
     #[arg(long, default_value_t = 10)]
     generate_every: usize,
@@ -73,6 +78,18 @@ impl Args {
             quantization: self.quantization,
         }
     }
+
+    fn set_network_params(&mut self, params: NetworkParams) {
+        self.learn_rate = params.learn_rate;
+        self.batch_size = params.batch_size;
+        self.frame_size = params.frame_size;
+        self.num_frames = params.num_frames;
+        self.hidden_size = params.hidden_size;
+        self.rnn_layers = params.rnn_layers;
+        self.embed_size = params.embed_size;
+        self.quantization = params.quantization;
+    }
+
     fn get_updatable(&self) -> UpdatableArgs {
         UpdatableArgs {
             out_path: self.out_path.clone(),
@@ -83,6 +100,7 @@ impl Args {
             learn_rate: EqF64(self.learn_rate),
         }
     }
+
     fn set_updatable(&mut self, updatable: &UpdatableArgs) {
         self.out_path = updatable.out_path.clone();
         self.length = updatable.length;
@@ -234,17 +252,35 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (signal, _, sample_rate) = util::read_file(&args.in_path)?;
     let signal = Audio::new(&signal, sample_rate, params.quantization);
 
-    println!("Input samples: {}", signal.len);
-
     let device = Device::cuda_if_available();
+
+    let (mut network, vs) = match (&args.load_model, &args.load_params) {
+        (None, None) => {
+            println!("Initializing new neural net");
+            let vs = nn::VarStore::new(device);
+            let network = NeuralNet::new(&vs, params);
+            (network, vs)
+        }
+        (Some(model_path), Some(params_path)) => {
+            println!(
+                "Initializing neural net from saved model:\nmodel: {}\nparams: {}",
+                model_path, params_path
+            );
+            let mut vs = nn::VarStore::new(device);
+            let network = NeuralNet::from_saved(&mut vs, model_path, params_path)?;
+            args.set_network_params(network.params);
+            (network, vs)
+        }
+        _ => {
+            return Err("Must provide both model and parameters file!".into());
+        }
+    };
+    let mut losses = vec![];
+
+    println!("Input samples: {}", signal.len);
     println!("Training neural net on {:?}", device);
     println!("== Arguments ==\n{:#?}", args);
     println!("===============");
-
-    let vs = nn::VarStore::new(device);
-
-    let mut network = NeuralNet::new(&vs, params);
-    let mut losses = vec![];
 
     if args.debug != 0 {
         signal.write_to_file("ground_truth.wav", &Vec::<i64>::from(&signal.audio));
@@ -264,8 +300,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             now.elapsed(),
         );
         losses.push(loss);
+        write_csv(&format!("{}losses.csv", args.out_path), &[losses.clone()]);
         if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
-            write_csv(&format!("{}losses.csv", args.out_path), &[losses.clone()]);
             generate(
                 &args.out_path,
                 epoch_i,
@@ -273,6 +309,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &network,
                 &signal,
             );
+        }
+
+        if args.checkpoint_every != 0 && epoch_i % args.checkpoint_every == 0 {
+            let path = format!("{}_epoch_{}", args.out_path, epoch_i);
+            if let Err(err) = network.checkpoint(&vs, &path) {
+                println!(
+                    "[ERROR] Couldn't checkpoint to file {}! Reason: {}",
+                    path, err
+                );
+            } else {
+                println!("Checkpointed at epoch {} to file {}", epoch_i, path);
+            };
         }
 
         match UpdatableArgs::try_from_file(&args.args_file) {

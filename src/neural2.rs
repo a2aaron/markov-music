@@ -1,6 +1,7 @@
-use std::io::Write;
+use std::{error::Error, io::Write, path::Path};
 
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use tch::{
     nn::{
         self, EmbeddingConfig, LSTMState, LinearConfig, Module, OptimizerConfig, RNNConfig,
@@ -12,7 +13,7 @@ thread_local! {
     pub static EPOCH_I: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NetworkParams {
     /// The learn rate of the network.
     pub learn_rate: f64,
@@ -165,13 +166,8 @@ impl FrameLevelRNN {
             ..
         } = params;
 
-        let lstm = lstm(&vs, frame_size, hidden_size, rnn_layers);
-        let linear = nn::linear(
-            &vs.root(),
-            hidden_size as i64,
-            (frame_size * hidden_size) as i64,
-            LinearConfig::default(),
-        );
+        let lstm = lstm(&vs, "frame_lstm", frame_size, hidden_size, rnn_layers);
+        let linear = linear(&vs, "frame_linear", hidden_size, frame_size * hidden_size);
         FrameLevelRNN {
             lstm,
             linear,
@@ -257,15 +253,15 @@ impl SamplePredictor {
         } = params;
 
         let embed = nn::embedding(
-            &vs.root(),
+            &vs.root() / "samp_pred_embed",
             quantization as i64,
             embed_size as i64,
             EmbeddingConfig::default(),
         );
-        let linear_1 = linear(vs, frame_size * embed_size, hidden_size);
-        let linear_2 = linear(vs, hidden_size, hidden_size);
-        let linear_3 = linear(vs, hidden_size, hidden_size);
-        let linear_out = linear(vs, hidden_size, quantization);
+        let linear_1 = linear(vs, "samp_pred_lin_1", frame_size * embed_size, hidden_size);
+        let linear_2 = linear(vs, "samp_pred_lin_2", hidden_size, hidden_size);
+        let linear_3 = linear(vs, "samp_pred_lin_3", hidden_size, hidden_size);
+        let linear_out = linear(vs, "samp_pred_lin_out", hidden_size, quantization);
         SamplePredictor {
             embed,
             linear_1,
@@ -321,13 +317,31 @@ pub struct NeuralNet {
 
 impl NeuralNet {
     pub fn new(vs: &VarStore, params: NetworkParams) -> NeuralNet {
-        let optim = nn::AdamW::default().build(vs, params.learn_rate).unwrap();
         NeuralNet {
             frame_level_rnn: FrameLevelRNN::new(&vs, params),
             sample_predictor: SamplePredictor::new(&vs, params),
-            optim,
+            optim: nn::AdamW::default().build(vs, params.learn_rate).unwrap(),
             params: params.clone(),
         }
+    }
+
+    pub fn from_saved(
+        vs: &mut VarStore,
+        model_path: impl AsRef<Path>,
+        params_path: impl AsRef<Path>,
+    ) -> Result<NeuralNet, Box<dyn Error>> {
+        let params_str = std::fs::read_to_string(params_path)?;
+        let params = serde_json::from_str(&params_str)?;
+        let neural_net = NeuralNet::new(vs, params);
+        vs.load(model_path)?;
+        Ok(neural_net)
+    }
+
+    pub fn checkpoint(&self, vs: &VarStore, path: &str) -> Result<(), Box<dyn Error>> {
+        let params = serde_json::ser::to_string_pretty(&self.params)?;
+        vs.save(format!("{}_checkpoint.bin", path))?;
+        std::fs::write(format!("{}_checkpoint_params.json", path), params)?;
+        Ok(())
     }
 
     pub fn set_learn_rate(&mut self, learn_rate: f64) {
@@ -422,19 +436,25 @@ impl NeuralNet {
     }
 }
 
-fn linear(vs: &VarStore, in_dim: usize, out_dim: usize) -> nn::Linear {
+fn linear(vs: &VarStore, path: &str, in_dim: usize, out_dim: usize) -> nn::Linear {
     nn::linear(
-        &vs.root(),
+        &vs.root() / path,
         in_dim as i64,
         out_dim as i64,
         LinearConfig::default(),
     )
 }
 
-fn lstm(vs: &VarStore, in_dim: usize, hidden_dim: usize, num_layers: usize) -> nn::LSTM {
+fn lstm(
+    vs: &VarStore,
+    path: &str,
+    in_dim: usize,
+    hidden_dim: usize,
+    num_layers: usize,
+) -> nn::LSTM {
     let mut config = RNNConfig::default();
     config.num_layers = num_layers as i64;
-    nn::lstm(&vs.root(), in_dim as i64, hidden_dim as i64, config)
+    nn::lstm(&vs.root() / path, in_dim as i64, hidden_dim as i64, config)
 }
 
 pub fn reshape(shape: &[usize], tensor: &Tensor) -> Tensor {
