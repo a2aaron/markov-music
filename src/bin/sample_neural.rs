@@ -282,9 +282,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("== Arguments ==\n{:#?}", args);
     println!("===============");
 
-    if args.debug != 0 {
-        signal.write_to_file("ground_truth.wav", &Vec::<i64>::from(&signal.audio));
-    }
+    signal.write_to_file("ground_truth.wav", &Vec::<i64>::from(&signal.audio));
 
     for epoch_i in 0.. {
         let now = Instant::now();
@@ -300,7 +298,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             now.elapsed(),
         );
         losses.push(loss);
-        write_csv(&format!("{}losses.csv", args.out_path), &[losses.clone()]);
+        if let Err(err) = write_csv(&format!("{}_losses.csv", args.out_path), &[losses.clone()]) {
+            println!(
+                "Couldn't write losses file {}. Reason: {}",
+                format!("{}_losses.csv", args.out_path),
+                err
+            );
+        }
         if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
             generate(
                 &args.out_path,

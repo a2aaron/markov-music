@@ -37,7 +37,12 @@ fn debug_tensor(tensor: &Tensor, name: &str) {
     let epoch = EPOCH_I.with(|i| *i.borrow());
     // print_tensor(&$var, name, line, epoch);
     let file_name = format!("outputs/{}_epoch_{}.csv", name, epoch);
-    write_tensor(&file_name, tensor);
+    if let Err(err) = write_tensor(&file_name, tensor) {
+        println!(
+            "Couldn't write tensor to file {}. Reason: {}",
+            file_name, err
+        );
+    }
 }
 
 pub fn print_tensor(tensor: &Tensor, tensor_name: &str, line: u32, epoch: usize) {
@@ -52,19 +57,20 @@ pub fn print_tensor(tensor: &Tensor, tensor_name: &str, line: u32, epoch: usize)
     tensor.print();
 }
 
-fn write_tensor(file_name: &str, data: &Tensor) {
+fn write_tensor(file_name: &str, data: &Tensor) -> Result<(), Box<dyn Error>> {
     let shape: Vec<f32> = data.size().into_iter().map(|x| x as f32).collect();
     let data: Vec<f32> = data.into();
-    write_csv(file_name, &[shape, data]);
+    write_csv(file_name, &[shape, data])
 }
 
-pub fn write_csv(file_name: &str, data: &[Vec<f32>]) {
-    let mut file = std::fs::File::create(file_name).unwrap();
+pub fn write_csv(file_name: &str, data: &[Vec<f32>]) -> Result<(), Box<dyn Error>> {
+    let mut file = std::fs::File::create(file_name)?;
     let data = data
         .iter()
         .map(|x| x.iter().map(|x| x.to_string()).join(","))
         .join(",\n");
-    file.write(data.as_bytes()).unwrap();
+    file.write(data.as_bytes())?;
+    Ok(())
 }
 
 /// Wrapper for the conditioning vector. Has shape [batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE]
