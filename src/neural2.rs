@@ -52,7 +52,7 @@ pub fn write_csv(file_name: &str, data: &[Vec<f32>]) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// Wrapper for the conditioning vector. Has shape [batch_size, num_frames * FRAME_SIZE, HIDDEN_SIZE]
+/// Wrapper for the conditioning vector. Has shape [batch_size, num_frames * frame_size, hidden_size]
 pub struct ConditioningVector {
     pub tensor: Tensor,
     batch_size: usize,
@@ -119,6 +119,17 @@ impl Frames {
         Vec::<i64>::from(&self.tensor)
     }
 
+    /// Unfolds the frame into windows of size self.frame_size. This will skip the last possible frame
+    /// For example, the following: `0 1 2 3 | 4 5 6 7`
+    /// is unfolded into:
+    /// ```
+    /// 0 1 2 3
+    ///   1 2 3 4
+    ///     2 3 4 5
+    ///       3 4 5 6
+    /// ```
+    /// Notice that `4 5 6 7` is NOT included.
+    /// Returned size is equal to `[batch_size, seq_len - frame_size, frame_size]`
     fn unfold(&self) -> (Tensor, usize) {
         // Get a bunch of local sliding windows across the input sequence.
         let frame = reshape(
@@ -127,9 +138,15 @@ impl Frames {
         );
         let frame = frame.unfold(1, self.frame_size as i64, 1);
 
-        let unfold_size = self.num_frames * self.frame_size - self.frame_size + 1;
+        let unfold_size = self.num_frames * self.frame_size - self.frame_size;
+        let frame = frame.narrow(1, 0, unfold_size as i64);
+
         assert_shape(&[self.batch_size, unfold_size, self.frame_size], &frame);
         (frame, unfold_size)
+    }
+
+    fn seq_len(&self) -> usize {
+        self.frame_size * self.num_frames
     }
 }
 
@@ -404,6 +421,8 @@ impl SamplePredictor {
         let batch_size = frame.size()[0] as usize;
         let unfold_size = frame.size()[1] as usize;
         let frame_size = self.frame_size;
+        assert_eq!(frame.size()[2] as usize, frame_size);
+
         let embed_size = self.embed_size;
         let hidden_size = self.hidden_size;
         let quantization = self.quantization;
@@ -522,33 +541,37 @@ impl NeuralNet {
         (out_samples, state)
     }
 
-    pub fn backward(&mut self, frame: &Frames, targets: &Frames) -> BackwardsDebug {
+    pub fn backward(
+        &mut self,
+        frame: &Frames,
+        overlap: &Frames,
+        targets: &Frames,
+    ) -> BackwardsDebug {
         let NetworkParams {
             batch_size,
             frame_size,
-            num_frames,
             quantization,
             ..
         } = self.params;
+        assert_eq!(frame_size, frame.frame_size);
+        assert_eq!(frame_size, overlap.frame_size);
+        assert_eq!(frame_size, targets.frame_size);
+        assert_eq!(overlap.num_frames, targets.num_frames + 1);
 
         let zero_state = self.zeros(batch_size);
         let (conditioning, _) = self.frame_level_rnn.forward(&frame, &zero_state);
 
-        let (unfolded_frame, unfold_size) = frame.unfold();
+        let (unfolded_overlap, unfold_size) = overlap.unfold();
+        assert_eq!(unfold_size, targets.seq_len());
+
         let logits = self
             .sample_predictor
-            .forward(&conditioning, &unfolded_frame);
+            .forward(&conditioning, &unfolded_overlap);
 
-        assert_shape(&[batch_size, unfold_size, quantization], &logits);
+        assert_shape(&[batch_size, targets.seq_len(), quantization], &logits);
 
-        let seq_len = num_frames * frame_size;
-
-        let logits = reshape(&[batch_size * unfold_size, quantization], &logits);
-
-        let targets = reshape(&[batch_size, seq_len], &targets.tensor);
-        let targets = targets.narrow(1, 0, unfold_size as i64);
-        let targets = reshape(&[batch_size * unfold_size], &targets);
-
+        let logits = reshape(&[batch_size * targets.seq_len(), quantization], &logits);
+        let targets = reshape(&[batch_size * targets.seq_len()], &targets.tensor);
         let loss = logits.cross_entropy_for_logits(&targets);
 
         self.optim.backward_step_clip(&loss, 0.5);
