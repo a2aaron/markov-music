@@ -6,10 +6,6 @@ use tch::{
     nn::{self, EmbeddingConfig, LinearConfig, Module, OptimizerConfig, RNNConfig, VarStore, RNN},
     Kind, Tensor,
 };
-thread_local! {
-    pub static EPOCH_I: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NetworkParams {
     /// The learn rate of the network.
@@ -30,18 +26,8 @@ pub struct NetworkParams {
     pub quantization: usize,
     /// Use skip connections in the RNN or not.
     pub skip_connections: bool,
-}
-
-fn debug_tensor(tensor: &Tensor, name: &str) {
-    let epoch = EPOCH_I.with(|i| *i.borrow());
-    // print_tensor(&$var, name, line, epoch);
-    let file_name = format!("outputs/{}_epoch_{}.csv", name, epoch);
-    if let Err(err) = write_tensor(&file_name, tensor) {
-        println!(
-            "Couldn't write tensor to file {}. Reason: {}",
-            file_name, err
-        );
-    }
+    /// Which epoch the network is currently at
+    pub epoch: usize,
 }
 
 pub fn print_tensor(tensor: &Tensor, tensor_name: &str, line: u32, epoch: usize) {
@@ -54,12 +40,6 @@ pub fn print_tensor(tensor: &Tensor, tensor_name: &str, line: u32, epoch: usize)
     );
     println!("{}", header);
     tensor.print();
-}
-
-fn write_tensor(file_name: &str, data: &Tensor) -> Result<(), Box<dyn Error>> {
-    let shape: Vec<f32> = data.size().into_iter().map(|x| x as f32).collect();
-    let data: Vec<f32> = data.into();
-    write_csv(file_name, &[shape, data])
 }
 
 pub fn write_csv(file_name: &str, data: &[Vec<f32>]) -> Result<(), Box<dyn Error>> {
@@ -333,12 +313,7 @@ impl FrameLevelRNN {
         }
     }
 
-    fn forward(
-        &self,
-        frame: &Frames,
-        state: &LSTMState,
-        debug_mode: bool,
-    ) -> (ConditioningVector, LSTMState) {
+    fn forward(&self, frame: &Frames, state: &LSTMState) -> (ConditioningVector, LSTMState) {
         let batch_size = frame.batch_size;
         let num_frames = frame.num_frames;
         let frame_size = self.frame_size;
@@ -355,12 +330,6 @@ impl FrameLevelRNN {
 
         let (conditioning, state) = self.lstm.seq_init(&frame, state);
         assert_shape(&[batch_size, num_frames, hidden_size], &conditioning);
-
-        if debug_mode {
-            println!("====== FRAMELEVELRNN::FORWARDS ======");
-            debug_tensor(&frame, "frame_float");
-            debug_tensor(&conditioning, "conditioning");
-        }
 
         let conditioning = self.linear.forward(&conditioning);
         assert_shape(
@@ -464,6 +433,13 @@ impl SamplePredictor {
         out
     }
 }
+
+pub struct BackwardsDebug {
+    pub loss: f32,
+    pub logits: Tensor,
+    pub targets: Tensor,
+}
+
 pub struct NeuralNet {
     frame_level_rnn: FrameLevelRNN,
     sample_predictor: SamplePredictor,
@@ -485,12 +461,12 @@ impl NeuralNet {
         vs: &mut VarStore,
         model_path: impl AsRef<Path>,
         params_path: impl AsRef<Path>,
-    ) -> Result<NeuralNet, Box<dyn Error>> {
+    ) -> Result<(NeuralNet, NetworkParams), Box<dyn Error>> {
         let params_str = std::fs::read_to_string(params_path)?;
         let params = serde_json::from_str(&params_str)?;
         let neural_net = NeuralNet::new(vs, params);
         vs.load(model_path)?;
-        Ok(neural_net)
+        Ok((neural_net, params))
     }
 
     pub fn checkpoint(&self, vs: &VarStore, path: &str) -> Result<(), Box<dyn Error>> {
@@ -513,7 +489,6 @@ impl NeuralNet {
         &self,
         mut sliding_window: Vec<i64>,
         state: &LSTMState,
-        debug_mode: bool,
     ) -> (Vec<i64>, LSTMState) {
         let NetworkParams {
             frame_size,
@@ -525,7 +500,7 @@ impl NeuralNet {
         let mut out_samples = Vec::with_capacity(frame_size);
 
         let mut frame = Frames::from_samples(&sliding_window);
-        let (conditioning, state) = self.frame_level_rnn.forward(&frame, state, debug_mode);
+        let (conditioning, state) = self.frame_level_rnn.forward(&frame, state);
 
         for _ in 0..frame_size {
             let logits = self.sample_predictor.forward(&conditioning, &frame.tensor);
@@ -547,7 +522,7 @@ impl NeuralNet {
         (out_samples, state)
     }
 
-    pub fn backward(&mut self, frame: &Frames, targets: &Frames, debug_mode: bool) -> f32 {
+    pub fn backward(&mut self, frame: &Frames, targets: &Frames) -> BackwardsDebug {
         let NetworkParams {
             batch_size,
             frame_size,
@@ -557,9 +532,7 @@ impl NeuralNet {
         } = self.params;
 
         let zero_state = self.zeros(batch_size);
-        let (conditioning, _) = self
-            .frame_level_rnn
-            .forward(&frame, &zero_state, debug_mode);
+        let (conditioning, _) = self.frame_level_rnn.forward(&frame, &zero_state);
 
         let (unfolded_frame, unfold_size) = frame.unfold();
         let logits = self
@@ -570,25 +543,22 @@ impl NeuralNet {
 
         let seq_len = num_frames * frame_size;
 
-        let logits_view = reshape(&[batch_size * unfold_size, quantization], &logits);
+        let logits = reshape(&[batch_size * unfold_size, quantization], &logits);
 
         let targets = reshape(&[batch_size, seq_len], &targets.tensor);
         let targets = targets.narrow(1, 0, unfold_size as i64);
         let targets = reshape(&[batch_size * unfold_size], &targets);
 
-        if debug_mode {
-            println!("====== NEURALNET::BACKWARDS ======");
-            debug_tensor(&frame.tensor, "frame_back");
-            debug_tensor(&targets, "targets_back");
-            debug_tensor(&logits, "logits_back");
-        }
-
-        let loss = logits_view.cross_entropy_for_logits(&targets);
+        let loss = logits.cross_entropy_for_logits(&targets);
 
         self.optim.backward_step_clip(&loss, 0.5);
 
-        EPOCH_I.with(|i| *i.borrow_mut() += 1);
-        f32::from(loss)
+        let loss = f32::from(loss);
+        BackwardsDebug {
+            loss,
+            logits,
+            targets,
+        }
     }
 }
 

@@ -64,8 +64,8 @@ struct Args {
     #[arg(long, default_value_t = 256)]
     quantization: usize,
     /// The file to read parameters from
-    #[arg(long, default_value_t = String::from("args.json"))]
-    args_file: String,
+    #[arg(long)]
+    args_file: Option<String>,
 }
 
 impl Args {
@@ -80,6 +80,7 @@ impl Args {
             embed_size: self.embed_size,
             quantization: self.quantization,
             skip_connections: !self.no_skip_connections,
+            epoch: 0,
         }
     }
 
@@ -246,7 +247,12 @@ impl Audio {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = Args::parse();
     let params = args.network_params();
-    args.get_updatable().write_to_file(&args.args_file)?;
+    let args_file = args
+        .args_file
+        .clone()
+        .unwrap_or(format!("{}_args.json", args.out_path));
+
+    args.get_updatable().write_to_file(&args_file)?;
 
     match args.debug {
         1 => std::env::set_var("RUST_BACKTRACE", "1"),
@@ -259,6 +265,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let device = Device::cuda_if_available();
 
+    let mut epoch_i = 0;
     let (mut network, vs) = match (&args.load_model, &args.load_params) {
         (None, None) => {
             println!("Initializing new neural net");
@@ -272,8 +279,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 model_path, params_path
             );
             let mut vs = nn::VarStore::new(device);
-            let network = NeuralNet::from_saved(&mut vs, model_path, params_path)?;
-            args.set_network_params(network.params);
+            let (network, params) = NeuralNet::from_saved(&mut vs, model_path, params_path)?;
+            epoch_i = params.epoch;
+            args.set_network_params(params);
             (network, vs)
         }
         _ => {
@@ -303,20 +311,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    for epoch_i in 0.. {
+    loop {
         let now = Instant::now();
         let (frames, targets) =
             signal.batch(params.batch_size, params.num_frames, params.frame_size);
 
-        let loss = network.backward(&frames, &targets, args.debug != 0);
+        let backwards_debug = network.backward(&frames, &targets);
 
         println!(
             "Epoch {}, loss = {:.8} (time = {:?})",
             epoch_i,
-            loss,
+            backwards_debug.loss,
             now.elapsed(),
         );
-        losses.push(loss);
+        losses.push(backwards_debug.loss);
+
         if let Err(err) = write_csv(&format!("{}_losses.csv", args.out_path), &[losses.clone()]) {
             println!(
                 "Couldn't write losses file {}. Reason: {}",
@@ -335,6 +344,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 println!("Checkpointed at epoch {} to file {}", epoch_i, path);
             };
+            if args.debug != 0 {
+                let now = Instant::now();
+                let logits_path = format!("{}_epoch_{}_logits_sample.wav", args.out_path, epoch_i);
+                let target_path = format!("{}_epoch_{}_logits_target.wav", args.out_path, epoch_i);
+                let logits_sampled = backwards_debug
+                    .logits
+                    .softmax(-1, tch::Kind::Float)
+                    .multinomial(1, false);
+                let logits_sampled = Vec::<i64>::from(logits_sampled);
+                let targets = Vec::<i64>::from(backwards_debug.targets);
+                signal.write_to_file(&logits_path, &logits_sampled);
+                signal.write_to_file(&target_path, &targets);
+                println!(
+                    "Saved debug files {} and {} (in {:?})",
+                    logits_path,
+                    target_path,
+                    now.elapsed()
+                );
+            }
         }
 
         if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
@@ -347,7 +375,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
         }
 
-        match UpdatableArgs::try_from_file(&args.args_file) {
+        match UpdatableArgs::try_from_file(&args_file) {
             Ok(new_args) => {
                 if new_args != args.get_updatable() {
                     println!("Updated args!\n{:#?}", new_args);
@@ -357,8 +385,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Err(err) => println!("Couldn't update args: {:?}", err),
         }
+        epoch_i += 1;
     }
-    Ok(())
 }
 
 fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, signal: &Audio) {
@@ -372,7 +400,7 @@ fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, sign
     let mut i = 0;
     let mut now = Instant::now();
     while samples.len() < length {
-        let (next_frame, next_state) = network.forward(frame, &state, false);
+        let (next_frame, next_state) = network.forward(frame, &state);
         state = next_state;
         samples.extend(next_frame.iter());
         frame = next_frame;
