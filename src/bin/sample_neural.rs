@@ -282,6 +282,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             let (network, params) = NeuralNet::from_saved(&mut vs, model_path, params_path)?;
             epoch_i = params.epoch;
             args.set_network_params(params);
+            println!(
+                "Successfully initialized network with the following params: {:?}",
+                params
+            );
             (network, vs)
         }
         _ => {
