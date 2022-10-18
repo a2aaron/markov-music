@@ -604,3 +604,27 @@ pub fn assert_shape(expected: &[usize], actual: &Tensor) {
         );
     }
 }
+
+#[test]
+fn test_unfold() {
+    let data = [1, 2, 3, 4, 5, 6, 7, 8];
+    let expected = [
+        [1, 2, 3, 4],
+        [2, 3, 4, 5],
+        [3, 4, 5, 6],
+        [4, 5, 6, 7],
+        [5, 6, 7, 8],
+    ];
+
+    let tensor = Tensor::of_slice(&data);
+    let tensor = reshape(&[1, 2, 4], &tensor);
+    let frame = Frames::new(tensor, 1, 2, 4);
+    let (unfolded, unfold_size) = frame.unfold();
+    assert_eq!(unfold_size, 5);
+    for i in 0..5 {
+        let unfolded_frame = tch::IndexOp::i(&unfolded, (0, i as i64));
+        assert_shape(&[4], &unfolded_frame);
+        let actual = Vec::<i64>::from(unfolded_frame);
+        assert_eq!(actual, expected[i])
+    }
+}
