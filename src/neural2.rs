@@ -92,6 +92,50 @@ impl ConditioningVector {
     }
 }
 
+/// A Tensor containing logits, of shape `[batch_size, num_samples, quantization]`
+pub struct Logits {
+    logits: Tensor,
+    quantization: usize,
+    batch_size: usize,
+    num_samples: usize,
+}
+
+impl Logits {
+    pub fn new(
+        logits: Tensor,
+        batch_size: usize,
+        num_samples: usize,
+        quantization: usize,
+    ) -> Logits {
+        assert_shape(&[batch_size, num_samples, quantization], &logits);
+        Logits {
+            logits,
+            quantization,
+            batch_size,
+            num_samples,
+        }
+    }
+
+    pub fn sample(&self) -> Vec<i64> {
+        let logits = reshape(
+            &[self.batch_size * self.num_samples, self.quantization],
+            &self.logits,
+        );
+        let sample = logits.softmax(-1, tch::Kind::Float).multinomial(1, false);
+        Vec::<i64>::from(sample)
+    }
+
+    pub fn sample_one(&self) -> i64 {
+        assert_eq!(self.batch_size, 1);
+        assert_eq!(self.num_samples, 1);
+        let sample = reshape(&[self.quantization], &self.logits);
+        let sample = sample.softmax(-1, tch::Kind::Float).multinomial(1, false);
+        assert_shape(&[1], &sample);
+
+        i64::from(sample)
+    }
+}
+
 pub struct Frames {
     pub tensor: Tensor,
     batch_size: usize,
@@ -417,7 +461,7 @@ impl SamplePredictor {
         }
     }
 
-    fn forward(&self, conditioning: &ConditioningVector, frame: &Tensor) -> Tensor {
+    fn forward(&self, conditioning: &ConditioningVector, frame: &Tensor) -> Logits {
         let batch_size = frame.size()[0] as usize;
         let unfold_size = frame.size()[1] as usize;
         let frame_size = self.frame_size;
@@ -449,7 +493,7 @@ impl SamplePredictor {
 
         assert_shape(&[batch_size, unfold_size, quantization], &out);
 
-        out
+        Logits::new(out, batch_size, unfold_size, quantization)
     }
 }
 
@@ -509,11 +553,7 @@ impl NeuralNet {
         mut sliding_window: Vec<i64>,
         state: &LSTMState,
     ) -> (Vec<i64>, LSTMState) {
-        let NetworkParams {
-            frame_size,
-            quantization,
-            ..
-        } = self.params;
+        let NetworkParams { frame_size, .. } = self.params;
 
         assert_eq!(sliding_window.len(), frame_size);
         let mut out_samples = Vec::with_capacity(frame_size);
@@ -523,12 +563,7 @@ impl NeuralNet {
 
         for _ in 0..frame_size {
             let logits = self.sample_predictor.forward(&conditioning, &frame.tensor);
-
-            assert_shape(&[1, 1, quantization], &logits);
-            let sample = reshape(&[quantization], &logits);
-            let sample = sample.softmax(-1, Kind::Float).multinomial(1, false);
-            assert_shape(&[1], &sample);
-            let sample = i64::from(sample);
+            let sample = logits.sample_one();
 
             sliding_window.remove(0);
             sliding_window.push(sample);
@@ -568,9 +603,10 @@ impl NeuralNet {
             .sample_predictor
             .forward(&conditioning, &unfolded_overlap);
 
-        assert_shape(&[batch_size, targets.seq_len(), quantization], &logits);
-
-        let logits = reshape(&[batch_size * targets.seq_len(), quantization], &logits);
+        let logits = reshape(
+            &[batch_size * targets.seq_len(), quantization],
+            &logits.logits,
+        );
         let targets = reshape(&[batch_size * targets.seq_len()], &targets.tensor);
         let loss = logits.cross_entropy_for_logits(&targets);
 
