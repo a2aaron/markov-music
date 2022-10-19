@@ -205,38 +205,29 @@ impl Audio {
     fn batch(
         &self,
         batch_size: usize,
-        input_num_frames: usize,
-        target_num_frames: usize,
+        num_frames: usize,
         frame_size: usize,
     ) -> (Frames, Frames, Frames) {
-        let input_seq_len = input_num_frames * frame_size;
-        let target_seq_len = target_num_frames * frame_size;
+        fn index(tensor: &Tensor, start: usize, length: usize) -> Tensor {
+            tensor.i(start as i64..(start + length) as i64)
+        }
+
+        let seq_len = num_frames * frame_size;
 
         let mut input_vec = vec![];
         let mut overlap_vec = vec![];
         let mut targets_vec = vec![];
 
         for _ in 0..batch_size {
-            let i = rand::thread_rng().gen_range(0..(self.len - (input_seq_len + target_seq_len)))
-                as i64;
+            let i = rand::thread_rng().gen_range(0..(self.len - (seq_len + frame_size)));
 
-            let (input, overlap, targets) = {
-                let input_seq_len = input_seq_len as i64;
-                let target_seq_len = target_seq_len as i64;
-                let frame_size = frame_size as i64;
-                let input = self.audio.i(i..i + input_seq_len);
-                let overlap = self
-                    .audio
-                    .i(i + (input_seq_len - frame_size)..i + input_seq_len + target_seq_len);
-                let targets = self
-                    .audio
-                    .i(i + input_seq_len..i + input_seq_len + target_seq_len);
-                (input, overlap, targets)
-            };
+            let input = index(&self.audio, i, seq_len);
+            let overlap = index(&self.audio, i, seq_len + frame_size);
+            let targets = index(&self.audio, i + frame_size, seq_len);
 
-            assert_shape(&[input_seq_len], &input);
-            assert_shape(&[target_seq_len + frame_size], &overlap);
-            assert_shape(&[target_seq_len], &targets);
+            assert_shape(&[seq_len], &input);
+            assert_shape(&[seq_len + frame_size], &overlap);
+            assert_shape(&[seq_len], &targets);
 
             input_vec.push(input);
             overlap_vec.push(overlap);
@@ -247,18 +238,18 @@ impl Audio {
         let overlap = Tensor::stack(&overlap_vec, 0);
         let targets = Tensor::stack(&targets_vec, 0);
 
-        assert_shape(&[batch_size, input_seq_len], &input);
-        assert_shape(&[batch_size, target_seq_len + frame_size], &overlap);
-        assert_shape(&[batch_size, target_seq_len], &targets);
+        assert_shape(&[batch_size, seq_len], &input);
+        assert_shape(&[batch_size, seq_len + frame_size], &overlap);
+        assert_shape(&[batch_size, seq_len], &targets);
 
-        let input = reshape(&[batch_size, input_num_frames, frame_size], &input);
-        let overlap = reshape(&[batch_size, target_num_frames + 1, frame_size], &overlap);
-        let targets = reshape(&[batch_size, target_num_frames, frame_size], &targets);
+        let input = reshape(&[batch_size, num_frames, frame_size], &input);
+        let overlap = reshape(&[batch_size, num_frames + 1, frame_size], &overlap);
+        let targets = reshape(&[batch_size, num_frames, frame_size], &targets);
 
         (
-            Frames::new(input, batch_size, input_num_frames, frame_size),
-            Frames::new(overlap, batch_size, target_num_frames + 1, frame_size),
-            Frames::new(targets, batch_size, target_num_frames, frame_size),
+            Frames::new(input, batch_size, num_frames, frame_size),
+            Frames::new(overlap, batch_size, num_frames + 1, frame_size),
+            Frames::new(targets, batch_size, num_frames, frame_size),
         )
     }
 
@@ -330,12 +321,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             &Vec::<i64>::from(&signal.audio),
         );
 
-        let (inputs, overlap, targets) = signal.batch(
-            args.batch_size,
-            args.num_frames,
-            args.num_frames,
-            args.frame_size,
-        );
+        let (inputs, overlap, targets) =
+            signal.batch(args.batch_size, args.num_frames, args.frame_size);
         signal.write_to_file(
             &format!("{}_batch_example_inputs.wav", args.out_path),
             &inputs.samples(),
@@ -352,12 +339,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     loop {
         let now = Instant::now();
-        let (frames, overlap, targets) = signal.batch(
-            params.batch_size,
-            params.num_frames,
-            args.num_frames,
-            params.frame_size,
-        );
+        let (frames, overlap, targets) =
+            signal.batch(params.batch_size, params.num_frames, params.frame_size);
 
         let backwards_debug = network.backward(&frames, &overlap, &targets);
 
@@ -408,7 +391,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        if args.generate_every != 0 && epoch_i != 0 && epoch_i % args.generate_every == 0 {
+        if args.generate_every != 0 && epoch_i % args.generate_every == 0 {
             generate(
                 &args.out_path,
                 epoch_i,
@@ -435,7 +418,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, signal: &Audio) {
     let total_time = Instant::now();
     let mut state = network.zeros(1);
-    let mut frame = signal.batch(1, 1, 1, network.params.frame_size).0.samples();
+    let mut frame = signal.batch(1, 1, network.params.frame_size).0.samples();
     let mut samples = Vec::with_capacity(length);
     samples.extend(frame.iter());
     println!("Generating {} samples...", length);
