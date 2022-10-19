@@ -84,7 +84,7 @@ impl ConditioningVector {
 
 /// A Tensor containing logits, of shape `[batch_size, num_samples, quantization]`
 pub struct Logits {
-    logits: Tensor,
+    tensor: Tensor,
     quantization: usize,
     batch_size: usize,
     num_samples: usize,
@@ -97,9 +97,9 @@ impl Logits {
         num_samples: usize,
         quantization: usize,
     ) -> Logits {
-        assert_shape(&[batch_size, num_samples, quantization], &logits);
+        assert_shape(&[batch_size * num_samples, quantization], &logits);
         Logits {
-            logits,
+            tensor: logits,
             quantization,
             batch_size,
             num_samples,
@@ -107,18 +107,17 @@ impl Logits {
     }
 
     pub fn sample(&self) -> Vec<i64> {
-        let logits = reshape(
-            &[self.batch_size * self.num_samples, self.quantization],
-            &self.logits,
-        );
-        let sample = logits.softmax(-1, tch::Kind::Float).multinomial(1, false);
+        let sample = self
+            .tensor
+            .softmax(-1, tch::Kind::Float)
+            .multinomial(1, false);
         Vec::<i64>::from(sample)
     }
 
     pub fn sample_one(&self) -> i64 {
         assert_eq!(self.batch_size, 1);
         assert_eq!(self.num_samples, 1);
-        let sample = reshape(&[self.quantization], &self.logits);
+        let sample = reshape(&[self.quantization], &self.tensor);
         let sample = sample.softmax(-1, tch::Kind::Float).multinomial(1, false);
         assert_shape(&[1], &sample);
 
@@ -143,6 +142,13 @@ impl Frames {
         }
     }
 
+    /// Flatten the tensor into shape `[batch_size * num_frames, frame_size]`
+    fn flatten(&self) -> (Tensor, usize) {
+        let length = self.batch_size * self.num_frames;
+        let tensor = reshape(&[length, self.frame_size], &self.tensor);
+        (tensor, length)
+    }
+
     fn from_samples(samples: &[i64]) -> Frames {
         let tensor = Tensor::of_slice(samples);
         let tensor = reshape(&[1, 1, samples.len()], &tensor);
@@ -164,7 +170,7 @@ impl Frames {
     /// ```
     /// Notice that `4 5 6 7` is NOT included.
     /// Returned size is equal to `[batch_size, seq_len - frame_size, frame_size]`
-    fn unfold(&self) -> (Tensor, usize) {
+    fn unfold(&self) -> Frames {
         // Get a bunch of local sliding windows across the input sequence.
         let frame = reshape(
             &[self.batch_size, self.num_frames * self.frame_size],
@@ -176,7 +182,7 @@ impl Frames {
         let frame = frame.narrow(1, 0, unfold_size as i64);
 
         assert_shape(&[self.batch_size, unfold_size, self.frame_size], &frame);
-        (frame, unfold_size)
+        Frames::new(frame, self.batch_size, unfold_size, self.frame_size)
     }
 
     fn seq_len(&self) -> usize {
@@ -451,15 +457,18 @@ impl SamplePredictor {
         }
     }
 
-    fn forward(&self, conditioning: &Tensor, frame: &Tensor) -> Tensor {
+    fn forward(&self, conditioning: &Tensor, frame: &Frames) -> Logits {
         let embed_size = self.embed_size;
         let hidden_size = self.hidden_size;
         let quantization = self.quantization;
         let frame_size = self.frame_size;
-        let length = frame.size()[0] as usize;
+        let batch_size = frame.batch_size;
+        let num_frames = frame.num_frames;
 
-        assert_eq!(conditioning.size()[0], frame.size()[0]);
-        assert_eq!(self.frame_size, frame.size()[1] as usize);
+        assert_eq!(self.frame_size, frame.frame_size);
+
+        let (frame, length) = frame.flatten();
+        assert_eq!(conditioning.size()[0] as usize, length);
 
         let frame = self.embed.forward(&frame);
         assert_shape(&[length, frame_size, embed_size], &frame);
@@ -479,14 +488,14 @@ impl SamplePredictor {
         let out = self.linear_out.forward(&out);
 
         assert_shape(&[length, quantization], &out);
-
+        let out = Logits::new(out, batch_size, num_frames, self.quantization);
         out
     }
 }
 
 pub struct BackwardsDebug {
     pub loss: f32,
-    pub logits: Tensor,
+    pub logits: Logits,
     pub targets: Tensor,
 }
 
@@ -547,21 +556,14 @@ impl NeuralNet {
 
         let mut frame = Frames::from_samples(&sliding_window);
         let (conditioning, state) = self.frame_level_rnn.forward(&frame, state);
-        // println!("cond: {:?}", conditioning.tensor.size());
 
         for i in 0..frame_size {
             let conditioning = conditioning
                 .tensor
                 .i((.., i as i64))
                 .reshape(&[-1, self.params.hidden_size as i64]);
-            let frame_tensor = frame.tensor.reshape(&[-1, self.params.frame_size as i64]);
 
-            // println!("frame: {:?}", frame_tensor.size());
-            // println!("cond: {:?}", conditioning.size());
-
-            let logits = self.sample_predictor.forward(&conditioning, &frame_tensor);
-            let logits = reshape(&[1, 1, self.params.quantization], &logits);
-            let logits = Logits::new(logits, 1, 1, self.params.quantization);
+            let logits = self.sample_predictor.forward(&conditioning, &frame);
             let sample = logits.sample_one();
             sliding_window.remove(0);
             sliding_window.push(sample);
@@ -583,7 +585,6 @@ impl NeuralNet {
         let NetworkParams {
             batch_size,
             frame_size,
-            quantization,
             ..
         } = self.params;
         assert_eq!(frame_size, frame.frame_size);
@@ -594,10 +595,10 @@ impl NeuralNet {
         let zero_state = self.zeros(batch_size);
         let (conditioning, _) = self.frame_level_rnn.forward(&frame, &zero_state);
 
-        let (unfolded_overlap, unfold_size) = overlap.unfold();
-        assert_eq!(unfold_size, targets.seq_len());
+        let unfolded_overlap = overlap.unfold();
+        assert_eq!(unfolded_overlap.num_frames, targets.seq_len());
 
-        let unfolded_overlap = unfolded_overlap.reshape(&[-1, frame_size as i64]);
+        // let unfolded_overlap = unfolded_overlap.reshape(&[-1, frame_size as i64]);
         let conditioning = conditioning
             .tensor
             .reshape(&[-1, self.params.hidden_size as i64]);
@@ -605,10 +606,9 @@ impl NeuralNet {
         let logits = self
             .sample_predictor
             .forward(&conditioning, &unfolded_overlap);
-
-        let logits = reshape(&[batch_size * targets.seq_len(), quantization], &logits);
         let targets = reshape(&[batch_size * targets.seq_len()], &targets.tensor);
-        let loss = logits.cross_entropy_for_logits(&targets);
+
+        let loss = logits.tensor.cross_entropy_for_logits(&targets);
 
         self.optim.backward_step_clip(&loss, 0.5);
 
@@ -678,10 +678,10 @@ fn test_unfold() {
     let tensor = Tensor::of_slice(&data);
     let tensor = reshape(&[1, 2, 4], &tensor);
     let frame = Frames::new(tensor, 1, 2, 4);
-    let (unfolded, unfold_size) = frame.unfold();
-    assert_eq!(unfold_size, 5);
+    let unfolded = frame.unfold();
+    assert_eq!(unfolded.num_frames, 5);
     for i in 0..5 {
-        let unfolded_frame = tch::IndexOp::i(&unfolded, (0, i as i64));
+        let unfolded_frame = tch::IndexOp::i(&unfolded.tensor, (0, i as i64));
         assert_shape(&[4], &unfolded_frame);
         let actual = Vec::<i64>::from(unfolded_frame);
         assert_eq!(actual, expected[i])

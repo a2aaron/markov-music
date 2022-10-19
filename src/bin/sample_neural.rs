@@ -374,13 +374,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let now = Instant::now();
                 let logits_path = format!("{}_epoch_{}_logits_sample.wav", args.out_path, epoch_i);
                 let target_path = format!("{}_epoch_{}_logits_target.wav", args.out_path, epoch_i);
-                let logits_sampled = backwards_debug
-                    .logits
-                    .softmax(-1, tch::Kind::Float)
-                    .multinomial(1, false);
-                let logits_sampled = Vec::<i64>::from(logits_sampled);
+                let logits = backwards_debug.logits.sample();
                 let targets = Vec::<i64>::from(backwards_debug.targets);
-                signal.write_to_file(&logits_path, &logits_sampled);
+                signal.write_to_file(&logits_path, &logits);
                 signal.write_to_file(&target_path, &targets);
                 println!(
                     "Saved debug files {} and {} (in {:?})",
