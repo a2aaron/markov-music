@@ -2,10 +2,10 @@ use std::{error::Error, time::Instant};
 
 use clap::{command, Parser};
 use itertools::Itertools;
-use markov_music::neural2::{assert_shape, reshape, write_csv, Frames, NetworkParams, NeuralNet};
+use markov_music::neural2::{DEVICE, assert_shape, reshape, write_csv, Frames, NetworkParams, NeuralNet};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use tch::{nn, Device, IndexOp, Tensor};
+use tch::{nn, IndexOp, Tensor};
 
 mod util;
 
@@ -178,7 +178,7 @@ impl Audio {
         let audio = audio.iter().cloned().map(|x| x - rounded_min).collect_vec();
         assert!(audio.iter().all(|x| 0 <= *x && *x < quantization as i64));
 
-        let audio = Tensor::of_slice(&audio);
+        let audio = Tensor::of_slice(&audio).to_device(*DEVICE);
         Audio {
             audio,
             min,
@@ -280,13 +280,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (signal, _, sample_rate) = util::read_file(&args.in_path)?;
     let signal = Audio::new(&signal, sample_rate, params.quantization);
 
-    let device = Device::cuda_if_available();
-
     let mut epoch_i = 0;
     let (mut network, vs) = match (&args.load_model, &args.load_params) {
         (None, None) => {
             println!("Initializing new neural net");
-            let vs = nn::VarStore::new(device);
+            let vs = nn::VarStore::new(*DEVICE);
             let network = NeuralNet::new(&vs, params);
             (network, vs)
         }
@@ -295,7 +293,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "Initializing neural net from saved model:\nmodel: {}\nparams: {}",
                 model_path, params_path
             );
-            let mut vs = nn::VarStore::new(device);
+            let mut vs = nn::VarStore::new(*DEVICE);
             let (network, params) = NeuralNet::from_saved(&mut vs, model_path, params_path)?;
             epoch_i = params.epoch;
             args.set_network_params(params);
@@ -312,7 +310,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut losses = vec![];
 
     println!("Input samples: {}", signal.len);
-    println!("Training neural net on {:?}", device);
+    println!("Training neural net on {:?}", *DEVICE);
     println!("== Arguments ==\n{:#?}", args);
     println!("===============");
     {

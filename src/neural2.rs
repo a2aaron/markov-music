@@ -1,11 +1,18 @@
-use std::{error::Error, io::Write, path::Path};
+use std::{sync::LazyLock, error::Error, io::Write, path::Path};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use tch::{
+    Device,
     nn::{self, EmbeddingConfig, LinearConfig, Module, OptimizerConfig, RNNConfig, VarStore, RNN},
     IndexOp, Kind, Tensor,
 };
+
+pub static DEVICE: LazyLock<Device> = LazyLock::new(|| {
+    tch::maybe_init_cuda();
+    Device::cuda_if_available()
+});
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NetworkParams {
     /// The learn rate of the network.
@@ -160,7 +167,7 @@ impl Frames {
     }
 
     fn from_samples(samples: &[i64]) -> Frames {
-        let tensor = Tensor::of_slice(samples);
+        let tensor = Tensor::of_slice(samples).to_device(*DEVICE);
         let tensor = reshape(&[1, 1, samples.len()], &tensor);
         Frames::new(tensor, 1, 1, samples.len())
     }

@@ -1,6 +1,7 @@
 #![feature(hash_drain_filter)]
 #![feature(let_chains)]
 #![feature(iter_intersperse)]
+#![feature(once_cell)]
 
 pub mod chaos;
 pub mod distribution;
