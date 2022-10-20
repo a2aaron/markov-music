@@ -53,6 +53,7 @@ pub fn write_csv(file_name: &str, data: &[Vec<f32>]) -> Result<(), Box<dyn Error
 }
 
 /// Wrapper for the conditioning vector. Has shape [batch_size, num_frames * frame_size, hidden_size]
+#[derive(Debug)]
 pub struct ConditioningVector {
     pub tensor: Tensor,
     batch_size: usize,
@@ -133,6 +134,7 @@ impl Logits {
 }
 
 /// A struct representing one or more frames. Tensor has shape `[batch_size, num_frames, frame_size]`
+#[derive(Debug)]
 pub struct Frames {
     pub tensor: Tensor,
     batch_size: usize,
@@ -419,6 +421,77 @@ impl FrameLevelRNN {
     }
 }
 
+struct SampleInputs {
+    cond_vec: Tensor,
+    frame: Tensor,
+    batch_size: usize,
+    frame_size: usize,
+    hidden_size: usize,
+    num_samples: usize,
+}
+
+impl SampleInputs {
+    fn new(frame: &Frames, conditioning: &ConditioningVector, index: usize) -> SampleInputs {
+        assert!(index < frame.frame_size);
+        assert_eq!(frame.batch_size, conditioning.batch_size);
+        assert_eq!(frame.frame_size, conditioning.frame_size);
+        assert_eq!(frame.num_frames, conditioning.num_frames);
+
+        let batch_size = frame.batch_size;
+        let num_frames = frame.num_frames;
+        let frame_size = frame.frame_size;
+        let hidden_size = conditioning.hidden_size;
+
+        let cond_vec = reshape(
+            &[batch_size * num_frames, frame_size, hidden_size],
+            &conditioning.tensor,
+        );
+        let cond_vec = cond_vec.i((.., index as i64));
+        assert_shape(&[batch_size * num_frames, hidden_size], &cond_vec);
+
+        SampleInputs {
+            cond_vec,
+            frame: reshape(&[batch_size * num_frames, frame_size], &frame.tensor),
+            batch_size,
+            frame_size,
+            hidden_size,
+            num_samples: batch_size * num_frames,
+        }
+    }
+
+    fn new_unfolded(frame: &Frames, conditioning: &ConditioningVector) -> SampleInputs {
+        assert_eq!(frame.batch_size, conditioning.batch_size);
+        assert_eq!(frame.frame_size, conditioning.frame_size);
+        assert_eq!(frame.num_frames - 1, conditioning.num_frames);
+
+        let batch_size = frame.batch_size;
+        let frame_size = frame.frame_size;
+        let hidden_size = conditioning.hidden_size;
+
+        let cond_vec = reshape(
+            &[
+                batch_size * frame_size * conditioning.num_frames,
+                hidden_size,
+            ],
+            &conditioning.tensor,
+        );
+        let unfolded = frame.unfold();
+        let unfolded = reshape(
+            &[batch_size * (frame.num_frames - 1) * frame_size, frame_size],
+            &unfolded.tensor,
+        );
+
+        SampleInputs {
+            cond_vec,
+            frame: unfolded,
+            batch_size,
+            frame_size,
+            hidden_size,
+            num_samples: conditioning.num_frames * frame_size,
+        }
+    }
+}
+
 pub struct SamplePredictor {
     embed: nn::Embedding,
     linear_1: nn::Linear,
@@ -465,44 +538,39 @@ impl SamplePredictor {
         }
     }
 
-    fn forward(&self, conditioning: &ConditioningVector, frame: &Frames) -> Logits {
+    fn forward(&self, inputs: &SampleInputs) -> Logits {
         let embed_size = self.embed_size;
         let hidden_size = self.hidden_size;
         let quantization = self.quantization;
         let frame_size = self.frame_size;
-        let batch_size = frame.batch_size;
-        let num_frames = frame.num_frames;
+        let batch_size = inputs.batch_size;
 
-        // assert_eq!(frame.frame_size, conditioning.frame_size);
-        // assert_eq!(frame.frame_size, conditioning.frame_size);
-        // assert_eq!(self.frame_size, conditioning.frame_size);
-        assert_eq!(frame.batch_size, conditioning.batch_size);
-        assert_eq!(self.hidden_size, conditioning.hidden_size);
+        assert_eq!(self.frame_size, inputs.frame_size);
+        assert_eq!(self.hidden_size, inputs.hidden_size);
 
-        let (frame, length) = frame.flatten();
-        let (conditioning, cond_length) = conditioning.flatten();
-
-        assert_eq!(length, cond_length);
-        assert_shape(&[length, hidden_size], &conditioning);
+        let frame = &inputs.frame;
+        let conditioning = &inputs.cond_vec;
 
         let frame = self.embed.forward(&frame);
-        assert_shape(&[length, frame_size, embed_size], &frame);
+        assert_shape(&[0, frame_size, embed_size], &frame);
 
-        let frame = reshape(&[length, frame_size * embed_size], &frame);
+        let frame = reshape(&[0, frame_size * embed_size], &frame);
 
         let mut out = self.linear_1.forward(&frame);
 
-        assert_shape(&[length, hidden_size], &out);
+        assert_shape(&[0, hidden_size], &out);
+        assert_shape(&[0, hidden_size], &conditioning);
 
         out += conditioning;
+
         let out = self.linear_2.forward(&out);
         let out = out.relu();
         let out = self.linear_3.forward(&out);
         let out = out.relu();
         let out = self.linear_out.forward(&out);
 
-        assert_shape(&[length, quantization], &out);
-        let out = Logits::new(out, batch_size, num_frames, self.quantization);
+        assert_shape(&[0, quantization], &out);
+        let out = Logits::new(out, batch_size, inputs.num_samples, self.quantization);
         out
     }
 }
@@ -580,14 +648,15 @@ impl NeuralNet {
         assert_eq!(conditioning.hidden_size, hidden_size);
         for i in 0..frame_size {
             // TODO: is this right
-            let cond_tensor =
-                conditioning
-                    .tensor
-                    .i((.., i as i64))
-                    .reshape(&[1, 1, hidden_size as i64]);
-            let conditioning = ConditioningVector::new(cond_tensor, 1, 1, hidden_size, 1);
+            // let cond_tensor =
+            //     conditioning
+            //         .tensor
+            //         .i((.., i as i64))
+            //         .reshape(&[1, 1, hidden_size as i64]);
+            // let conditioning = ConditioningVector::new(cond_tensor, 1, 1, hidden_size, 1);
+            let inputs = SampleInputs::new(&frame, &conditioning, i);
 
-            let logits = self.sample_predictor.forward(&conditioning, &frame);
+            let logits = self.sample_predictor.forward(&inputs);
             let sample = logits.sample_one();
             sliding_window.remove(0);
             sliding_window.push(sample);
@@ -619,12 +688,11 @@ impl NeuralNet {
         let zero_state = self.zeros(batch_size);
         let (conditioning, _) = self.frame_level_rnn.forward(&frame, &zero_state);
 
-        let unfolded_overlap = overlap.unfold();
-        assert_eq!(unfolded_overlap.num_frames, targets.seq_len());
+        // let unfolded_overlap = overlap.unfold();
+        // assert_eq!(unfolded_overlap.num_frames, targets.seq_len());
 
-        let logits = self
-            .sample_predictor
-            .forward(&conditioning, &unfolded_overlap);
+        let inputs = SampleInputs::new_unfolded(&overlap, &conditioning);
+        let logits = self.sample_predictor.forward(&inputs);
         let targets = reshape(&[batch_size * targets.seq_len()], &targets.tensor);
 
         let loss = logits.tensor.cross_entropy_for_logits(&targets);
@@ -662,7 +730,10 @@ fn lstm(
 }
 
 pub fn reshape(shape: &[usize], tensor: &Tensor) -> Tensor {
-    let shape = shape.iter().map(|x| *x as i64).collect_vec();
+    let shape = shape
+        .iter()
+        .map(|&x| if x == 0 { -1 } else { x as i64 })
+        .collect_vec();
     tensor.reshape(&shape)
 }
 
