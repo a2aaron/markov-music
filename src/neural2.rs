@@ -1,11 +1,10 @@
-use std::{sync::LazyLock, error::Error, io::Write, path::Path};
+use std::{error::Error, io::Write, path::Path, sync::LazyLock};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use tch::{
-    Device,
     nn::{self, EmbeddingConfig, LinearConfig, Module, OptimizerConfig, RNNConfig, VarStore, RNN},
-    IndexOp, Kind, Tensor,
+    Device, IndexOp, Kind, Tensor,
 };
 
 pub static DEVICE: LazyLock<Device> = LazyLock::new(|| {
@@ -88,13 +87,6 @@ impl ConditioningVector {
             frame_size,
         }
     }
-
-    /// Flatten the tensor into shape `[batch_size * num_frames * frame_size, hidden_size]`
-    fn flatten(&self) -> (Tensor, usize) {
-        let length = self.batch_size * self.num_frames * self.frame_size;
-        let tensor = reshape(&[length, self.hidden_size], &self.tensor);
-        (tensor, length)
-    }
 }
 
 /// A Tensor containing logits, of shape `[batch_size, num_samples, quantization]`
@@ -157,13 +149,6 @@ impl Frames {
             num_frames,
             frame_size,
         }
-    }
-
-    /// Flatten the tensor into shape `[batch_size * num_frames, frame_size]`
-    fn flatten(&self) -> (Tensor, usize) {
-        let length = self.batch_size * self.num_frames;
-        let tensor = reshape(&[length, self.frame_size], &self.tensor);
-        (tensor, length)
     }
 
     fn from_samples(samples: &[i64]) -> Frames {
