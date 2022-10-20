@@ -639,13 +639,6 @@ impl NeuralNet {
         assert_eq!(conditioning.frame_size, frame_size);
         assert_eq!(conditioning.hidden_size, hidden_size);
         for i in 0..frame_size {
-            // TODO: is this right
-            // let cond_tensor =
-            //     conditioning
-            //         .tensor
-            //         .i((.., i as i64))
-            //         .reshape(&[1, 1, hidden_size as i64]);
-            // let conditioning = ConditioningVector::new(cond_tensor, 1, 1, hidden_size, 1);
             let inputs = SampleInputs::new(&frame, &conditioning, i);
 
             let logits = self.sample_predictor.forward(&inputs);
@@ -679,10 +672,6 @@ impl NeuralNet {
 
         let zero_state = self.zeros(batch_size);
         let (conditioning, _) = self.frame_level_rnn.forward(&frame, &zero_state);
-
-        // let unfolded_overlap = overlap.unfold();
-        // assert_eq!(unfolded_overlap.num_frames, targets.seq_len());
-
         let inputs = SampleInputs::new_unfolded(&overlap, &conditioning);
         let logits = self.sample_predictor.forward(&inputs);
         let targets = reshape(&[batch_size * targets.seq_len()], &targets.tensor);
