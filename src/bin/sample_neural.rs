@@ -343,10 +343,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let backwards_debug = network.backward(&frames, &overlap, &targets);
 
         println!(
-            "Epoch {}, loss = {:.8} (time = {:?})",
+            "Epoch {}, loss = {:.8} (time = {:?}, accuracy = {:.2}%)",
             epoch_i,
             backwards_debug.loss,
             now.elapsed(),
+            backwards_debug.accuracy * 100.0,
         );
         losses.push(backwards_debug.loss);
 

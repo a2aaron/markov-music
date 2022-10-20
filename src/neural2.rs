@@ -571,6 +571,7 @@ pub struct BackwardsDebug {
     pub loss: f32,
     pub logits: Logits,
     pub targets: Tensor,
+    pub accuracy: f32,
 }
 
 pub struct NeuralNet {
@@ -677,6 +678,7 @@ impl NeuralNet {
         let targets = reshape(&[batch_size * targets.seq_len()], &targets.tensor);
 
         let loss = logits.tensor.cross_entropy_for_logits(&targets);
+        let accuracy = logits.tensor.accuracy_for_logits(&targets).into();
 
         self.optim.backward_step_clip(&loss, 0.5);
 
@@ -685,6 +687,7 @@ impl NeuralNet {
             loss,
             logits,
             targets,
+            accuracy,
         }
     }
 }
