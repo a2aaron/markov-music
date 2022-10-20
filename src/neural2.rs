@@ -80,6 +80,13 @@ impl ConditioningVector {
             frame_size,
         }
     }
+
+    /// Flatten the tensor into shape `[batch_size * num_frames * frame_size, hidden_size]`
+    fn flatten(&self) -> (Tensor, usize) {
+        let length = self.batch_size * self.num_frames * self.frame_size;
+        let tensor = reshape(&[length, self.hidden_size], &self.tensor);
+        (tensor, length)
+    }
 }
 
 /// A Tensor containing logits, of shape `[batch_size, num_samples, quantization]`
@@ -125,6 +132,7 @@ impl Logits {
     }
 }
 
+/// A struct representing one or more frames. Tensor has shape `[batch_size, num_frames, frame_size]`
 pub struct Frames {
     pub tensor: Tensor,
     batch_size: usize,
@@ -457,7 +465,7 @@ impl SamplePredictor {
         }
     }
 
-    fn forward(&self, conditioning: &Tensor, frame: &Frames) -> Logits {
+    fn forward(&self, conditioning: &ConditioningVector, frame: &Frames) -> Logits {
         let embed_size = self.embed_size;
         let hidden_size = self.hidden_size;
         let quantization = self.quantization;
@@ -465,10 +473,17 @@ impl SamplePredictor {
         let batch_size = frame.batch_size;
         let num_frames = frame.num_frames;
 
-        assert_eq!(self.frame_size, frame.frame_size);
+        // assert_eq!(frame.frame_size, conditioning.frame_size);
+        // assert_eq!(frame.frame_size, conditioning.frame_size);
+        // assert_eq!(self.frame_size, conditioning.frame_size);
+        assert_eq!(frame.batch_size, conditioning.batch_size);
+        assert_eq!(self.hidden_size, conditioning.hidden_size);
 
         let (frame, length) = frame.flatten();
-        assert_eq!(conditioning.size()[0] as usize, length);
+        let (conditioning, cond_length) = conditioning.flatten();
+
+        assert_eq!(length, cond_length);
+        assert_shape(&[length, hidden_size], &conditioning);
 
         let frame = self.embed.forward(&frame);
         assert_shape(&[length, frame_size, embed_size], &frame);
@@ -478,7 +493,6 @@ impl SamplePredictor {
         let mut out = self.linear_1.forward(&frame);
 
         assert_shape(&[length, hidden_size], &out);
-        assert_shape(&[length, hidden_size], &conditioning);
 
         out += conditioning;
         let out = self.linear_2.forward(&out);
@@ -549,19 +563,29 @@ impl NeuralNet {
         mut sliding_window: Vec<i64>,
         state: &LSTMState,
     ) -> (Vec<i64>, LSTMState) {
-        let NetworkParams { frame_size, .. } = self.params;
+        let NetworkParams {
+            frame_size,
+            hidden_size,
+            ..
+        } = self.params;
 
         assert_eq!(sliding_window.len(), frame_size);
         let mut out_samples = Vec::with_capacity(frame_size);
 
         let mut frame = Frames::from_samples(&sliding_window);
         let (conditioning, state) = self.frame_level_rnn.forward(&frame, state);
-
+        assert_eq!(conditioning.batch_size, 1);
+        assert_eq!(conditioning.num_frames, 1);
+        assert_eq!(conditioning.frame_size, frame_size);
+        assert_eq!(conditioning.hidden_size, hidden_size);
         for i in 0..frame_size {
-            let conditioning = conditioning
-                .tensor
-                .i((.., i as i64))
-                .reshape(&[-1, self.params.hidden_size as i64]);
+            // TODO: is this right
+            let cond_tensor =
+                conditioning
+                    .tensor
+                    .i((.., i as i64))
+                    .reshape(&[1, 1, hidden_size as i64]);
+            let conditioning = ConditioningVector::new(cond_tensor, 1, 1, hidden_size, 1);
 
             let logits = self.sample_predictor.forward(&conditioning, &frame);
             let sample = logits.sample_one();
@@ -597,11 +621,6 @@ impl NeuralNet {
 
         let unfolded_overlap = overlap.unfold();
         assert_eq!(unfolded_overlap.num_frames, targets.seq_len());
-
-        // let unfolded_overlap = unfolded_overlap.reshape(&[-1, frame_size as i64]);
-        let conditioning = conditioning
-            .tensor
-            .reshape(&[-1, self.params.hidden_size as i64]);
 
         let logits = self
             .sample_predictor
