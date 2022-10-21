@@ -2,7 +2,9 @@ use std::{error::Error, time::Instant};
 
 use clap::{command, Parser};
 use itertools::Itertools;
-use markov_music::neural2::{DEVICE, assert_shape, reshape, write_csv, Frames, NetworkParams, NeuralNet};
+use markov_music::neural2::{
+    assert_shape, reshape, write_csv, Frames, NetworkParams, NeuralNet, DEVICE,
+};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tch::{nn, IndexOp, Tensor};
@@ -28,7 +30,7 @@ struct Args {
     #[arg(long)]
     load_params: Option<String>,
     /// How often to generate audio
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 100)]
     generate_every: usize,
     /// How often to checkpoint to a file
     #[arg(long, default_value_t = 100)]
