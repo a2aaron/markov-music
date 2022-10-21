@@ -414,33 +414,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn generate(name: &str, epoch_i: usize, length: usize, network: &NeuralNet, signal: &Audio) {
     let total_time = Instant::now();
-    let mut state = network.zeros(1);
-    let mut frame = signal.batch(1, 1, network.params.frame_size).0.samples();
-    let mut samples = Vec::with_capacity(length);
-    samples.extend(frame.iter());
+    let state = network.zeros(1);
+    let prompt = signal.batch(1, 1, network.params.frame_size).0.samples();
     println!("Generating {} samples...", length);
 
-    let mut i = 0;
-    let mut now = Instant::now();
-    while samples.len() < length {
-        let (next_frame, next_state) = network.forward(frame, &state);
-        state = next_state;
-        samples.extend(next_frame.iter());
-        frame = next_frame;
-
-        if i % 500 == 0 {
-            println!(
-                "Generating... ({:?} / {} samples ({:.2}%), epoch {}, took {:?})",
-                samples.len(),
-                length,
-                100.0 * (samples.len() as f32 / length as f32),
-                epoch_i,
-                now.elapsed()
-            );
-            now = Instant::now();
-        }
-        i += 1;
-    }
+    let (samples, _) =
+        network.generate(&prompt, length / network.params.frame_size, state, epoch_i);
+    let samples = Vec::<i64>::from(samples);
 
     signal.write_to_file(&format!("{}{}.wav", name, epoch_i), &samples);
     println!("Generated! total time = {:?}", total_time.elapsed());

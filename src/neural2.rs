@@ -121,14 +121,17 @@ impl Logits {
         Vec::<i64>::from(sample)
     }
 
-    pub fn sample_one(&self) -> i64 {
+    fn sample_one_tensor(&self) -> Tensor {
         assert_eq!(self.batch_size, 1);
         assert_eq!(self.num_samples, 1);
         let sample = reshape(&[self.quantization], &self.tensor);
         let sample = sample.softmax(-1, tch::Kind::Float).multinomial(1, false);
         assert_shape(&[1], &sample);
+        sample
+    }
 
-        i64::from(sample)
+    pub fn sample_one(&self) -> i64 {
+        i64::from(self.sample_one_tensor())
     }
 }
 
@@ -149,12 +152,6 @@ impl Frames {
             num_frames,
             frame_size,
         }
-    }
-
-    fn from_samples(samples: &[i64]) -> Frames {
-        let tensor = Tensor::of_slice(samples).to_device(*DEVICE);
-        let tensor = reshape(&[1, 1, samples.len()], &tensor);
-        Frames::new(tensor, 1, 1, samples.len())
     }
 
     pub fn samples(&self) -> Vec<i64> {
@@ -619,40 +616,67 @@ impl NeuralNet {
         self.frame_level_rnn.lstm.zero_state(batch_dim as i64)
     }
 
-    pub fn forward(
+    pub fn generate(
         &self,
-        mut sliding_window: Vec<i64>,
-        state: &LSTMState,
-    ) -> (Vec<i64>, LSTMState) {
+        prompt: &[i64],
+        num_frames: usize,
+        mut state: LSTMState,
+        epoch_i: usize,
+    ) -> (Tensor, LSTMState) {
         let NetworkParams {
             frame_size,
             hidden_size,
             ..
         } = self.params;
 
-        assert_eq!(sliding_window.len(), frame_size);
-        let mut out_samples = Vec::with_capacity(frame_size);
+        assert_eq!(prompt.len(), frame_size);
+        let mut now = std::time::Instant::now();
+        let samples = Tensor::zeros(
+            &[(frame_size * (num_frames + 1)) as i64],
+            (Kind::Int64, *DEVICE),
+        );
 
-        let mut frame = Frames::from_samples(&sliding_window);
-        let (conditioning, state) = self.frame_level_rnn.forward(&frame, state);
-        assert_eq!(conditioning.batch_size, 1);
-        assert_eq!(conditioning.num_frames, 1);
-        assert_eq!(conditioning.frame_size, frame_size);
-        assert_eq!(conditioning.hidden_size, hidden_size);
-        for i in 0..frame_size {
-            let inputs = SampleInputs::new(&frame, &conditioning, i);
+        for frame_i in 0..num_frames {
+            let lower = frame_i * frame_size;
+            let in_frame = samples.i(lower as i64..(lower + frame_size) as i64);
+            let in_frame = reshape(&[1, 1, frame_size], &in_frame);
+            let in_frame = Frames::new(in_frame, 1, 1, frame_size);
+            let (conditioning, new_state) = self.frame_level_rnn.forward(&in_frame, &state);
 
-            let logits = self.sample_predictor.forward(&inputs);
-            let sample = logits.sample_one();
-            sliding_window.remove(0);
-            sliding_window.push(sample);
-            assert_eq!(sliding_window.len(), frame_size);
+            assert_eq!(conditioning.batch_size, 1);
+            assert_eq!(conditioning.num_frames, 1);
+            assert_eq!(conditioning.frame_size, frame_size);
+            assert_eq!(conditioning.hidden_size, hidden_size);
 
-            frame = Frames::from_samples(&sliding_window);
-            out_samples.push(sample);
+            for sample_i in 0..frame_size {
+                let sliding_frame =
+                    samples.i((lower + sample_i) as i64..(lower + sample_i + frame_size) as i64);
+                let sliding_frame = reshape(&[1, 1, frame_size], &sliding_frame);
+                let sliding_frame = Frames::new(sliding_frame, 1, 1, frame_size);
+                let inputs = SampleInputs::new(&sliding_frame, &conditioning, sample_i);
+
+                let logits = self.sample_predictor.forward(&inputs);
+                let sample = logits.sample_one_tensor();
+                samples
+                    .i(((lower + sample_i) as i64)..((lower + sample_i + 1) as i64))
+                    .copy_(&sample);
+            }
+
+            state = new_state;
+
+            if frame_i % 500 == 0 {
+                println!(
+                    "Generating... ({:?} / {} frames ({:.2}%), epoch {}, took {:?})",
+                    frame_i,
+                    num_frames,
+                    100.0 * (frame_i as f32 / num_frames as f32),
+                    epoch_i,
+                    now.elapsed()
+                );
+                now = std::time::Instant::now();
+            }
         }
-
-        (out_samples, state)
+        (samples, state)
     }
 
     pub fn backward(
